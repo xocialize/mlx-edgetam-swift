@@ -96,6 +96,18 @@ def video_fixture(g):
     }
     for i in range(5):
         vf[f"mask_f{i}"] = mx.array(np.load(f"{g}/vid_mask_f{i}.npy")[0, 0].astype(np.float32))  # (540,960)
+    # ENHANCEMENT(v2) goldens: per-object multi-object tracks + box-prompt track (all (H,W)).
+    import os
+    for i in range(5):
+        for o in range(2):
+            p = f"{g}/vid_mo_obj{o}_f{i}.npy"
+            if os.path.exists(p):
+                vf[f"mo_obj{o}_f{i}"] = mx.array(np.load(p)[0, 0].astype(np.float32))
+        bp = f"{g}/vid_box_f{i}.npy"
+        if os.path.exists(bp):
+            vf[f"box_f{i}"] = mx.array(np.load(bp)[0, 0].astype(np.float32))
+    if os.path.exists(f"{g}/vid_box_xyxy.npy"):
+        vf["box_xyxy"] = mx.array(np.load(f"{g}/vid_box_xyxy.npy").astype(np.float32))  # (4,)
     mx.save_safetensors(f"{HERE}/weights/parity_video.safetensors", vf)
     print(f"[vid-fixture] {[(k, tuple(v.shape)) for k, v in vf.items()]}")
 

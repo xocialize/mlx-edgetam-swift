@@ -88,6 +88,64 @@ struct VideoSmoke: ParsableCommand {
         print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.90  %@",
                      ("propagate (5 frames)" as NSString).utf8String!, minIoU, ok ? "OK ✅" : "FAIL ❌"))
 
+        // Binary-IoU helper for the v2 cases.
+        func iou(_ pred: MLXArray, _ goldKey: String) -> Float {
+            let p = (pred .> 0).asType(.float32)
+            let gg = (fx[goldKey]! .> 0).asType(.float32)
+            let inter = (p * gg).sum().item(Float.self)
+            let uni = ((p + gg) .> 0).asType(.float32).sum().item(Float.self)
+            return uni > 0 ? inter / uni : 1
+        }
+
+        // 8) ENHANCEMENT(v2) #1 — MULTI-OBJECT: boy + girl in ONE shared-encode pass → 2 tracks. Each must
+        // match its per-object golden; object 0 (boy) must also equal the single-object track (independence).
+        let objects = [
+            ObjectPrompt(clickFrame: 0, points: [[210, 350]], labels: [1]),   // obj 0: boy
+            ObjectPrompt(clickFrame: 0, points: [[400, 240]], labels: [1]),   // obj 1: girl
+        ]
+        let tracks = m.propagate(frames: frames, objects: objects, origH: origH, origW: origW)
+        // Binary IoU between two Swift masks (independence check — same tensor, no golden).
+        func iouAB(_ a: MLXArray, _ b: MLXArray) -> Float {
+            let p = (a .> 0).asType(.float32), gg = (b .> 0).asType(.float32)
+            let inter = (p * gg).sum().item(Float.self)
+            let uni = ((p + gg) .> 0).asType(.float32).sum().item(Float.self)
+            return uni > 0 ? inter / uni : 1
+        }
+        var moMin: Float = 1, indepMin: Float = 1
+        for o in 0 ..< 2 {
+            for i in 0 ..< 5 { moMin = min(moMin, iou(tracks[o].masks[i], "mo_obj\(o)_f\(i)")) }
+            print(String(format: "[vid-smoke]   mo obj%d  cov f0=%.2f%%", o,
+                         (tracks[o].masks[0] .> 0).asType(.float32).mean().item(Float.self) * 100))
+        }
+        // Independence: object 0 (boy) in the shared-encode multi-object pass == the single-object Swift
+        // track bit-for-bit (per-object memory banks don't interact; shared encode is deterministic).
+        for i in 0 ..< 5 { indepMin = min(indepMin, iouAB(tracks[0].masks[i], masks[i])) }
+        let moOK = moMin > 0.90, indepOK = indepMin > 0.999
+        failed = failed || !moOK || !indepOK
+        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.90  %@",
+                     ("multi-object (2×5f)" as NSString).utf8String!, moMin, moOK ? "OK ✅" : "FAIL ❌"))
+        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.999 %@  (obj0==single Swift)",
+                     ("  obj0 independence" as NSString).utf8String!, indepMin, indepOK ? "OK ✅" : "FAIL ❌"))
+
+        // 9) ENHANCEMENT(v2) #2 — BOX PROMPT: box-only track (no points) vs the box-prompted golden.
+        // f0 is the directly box-prompted frame (the encoding-parity test); f1–4 add propagation drift,
+        // which on this ~0.4%-coverage object diverges more than the point prompt (boundary-px sensitive).
+        let bx = fx["box_xyxy"]!                                          // (4,) in source px
+        let box: [Float] = (0 ..< 4).map { bx[$0].item(Float.self) }
+        let (bmasks, _) = m.propagate(frames: frames, clickFrame: 0, points: [], labels: [], box: box,
+                                      origH: origH, origW: origW)
+        var boxMin: Float = 1
+        for i in 0 ..< 5 {
+            let v = iou(bmasks[i], "box_f\(i)")
+            boxMin = min(boxMin, v)
+            print(String(format: "[vid-smoke]   box f%d  IoU=%.4f  cov=%.2f%%", i, v,
+                         (bmasks[i] .> 0).asType(.float32).mean().item(Float.self) * 100))
+        }
+        let boxOK = boxMin > 0.85     // single-mask box-prompt frame + propagated track all parity-match
+        failed = failed || !boxOK
+        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.85  %@",
+                     ("box prompt (5f)" as NSString).utf8String!, boxMin, boxOK ? "OK ✅" : "FAIL ❌"))
+
         if failed { throw ExitCode(1) }
         print("[vid-smoke] ALL P2 PARITY GATES PASSED ✅")
     }

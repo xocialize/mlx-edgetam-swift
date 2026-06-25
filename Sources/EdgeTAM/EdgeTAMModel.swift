@@ -110,14 +110,27 @@ public final class EdgeTAMModel: @unchecked Sendable {
     }
 
     // MARK: prompt encoder
-    func embedPrompt(_ coordsPx: MLXArray, _ labels: [Int]) -> (sparse: MLXArray, dense: MLXArray) {
-        let pts = MLX.concatenated([coordsPx + 0.5, MLXArray([0.0, 0.0] as [Float], [1, 2])], axis: 0)
-        let labelsF = labels + [-1]
-        let pe = peEncoding(pts / 1024.0)                             // (N+1,256)
+    /// Point and/or box prompts → sparse tokens + the no-mask dense embedding. Coordinates are in model
+    /// space (1024²). SAM convention: the trailing `not_a_point` pad token is appended ONLY when no box is
+    /// present; a box contributes two corner tokens (top-left → `point_embeddings.2`, bottom-right → `.3`).
+    func embedPrompt(_ coordsPx: MLXArray, _ labels: [Int], box: [Float]? = nil) -> (sparse: MLXArray, dense: MLXArray) {
         var rows: [MLXArray] = []
-        for (i, lb) in labelsF.enumerated() {
-            if lb == -1 { rows.append(a("sam_prompt_encoder.not_a_point_embed.weight")[0]) }
-            else { rows.append(pe[i] + a("sam_prompt_encoder.point_embeddings.\(lb).weight")[0]) }
+        if !labels.isEmpty {
+            let pad = (box == nil)                                    // pad with a not_a_point token iff no box
+            let pts = pad ? MLX.concatenated([coordsPx + 0.5, MLXArray([0.0, 0.0] as [Float], [1, 2])], axis: 0)
+                          : coordsPx + 0.5
+            let labelsF = pad ? labels + [-1] : labels
+            let pe = peEncoding(pts / 1024.0)                         // (N[+1],256)
+            for (i, lb) in labelsF.enumerated() {
+                if lb == -1 { rows.append(a("sam_prompt_encoder.not_a_point_embed.weight")[0]) }
+                else { rows.append(pe[i] + a("sam_prompt_encoder.point_embeddings.\(lb).weight")[0]) }
+            }
+        }
+        if let box {                                                 // box → 2 corner tokens (labels 2,3)
+            let corners = MLXArray([box[0], box[1], box[2], box[3]] as [Float], [2, 2]) + 0.5
+            let pe = peEncoding(corners / 1024.0)                     // (2,256)
+            rows.append(pe[0] + a("sam_prompt_encoder.point_embeddings.2.weight")[0])
+            rows.append(pe[1] + a("sam_prompt_encoder.point_embeddings.3.weight")[0])
         }
         let sparse = MLX.stacked(rows, axis: 0).reshaped([1, rows.count, 256])
         let dense = MLX.broadcast(a("sam_prompt_encoder.no_mask_embed.weight").reshaped([1, 1, 1, 256]), to: [1, 64, 64, 256])

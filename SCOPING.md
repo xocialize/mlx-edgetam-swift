@@ -145,7 +145,29 @@ RoPE-2D, num_heads 1) → mask decoder → **encode new memory**: MaskDownSample
   `[Matte]`. `edgetam-video-package-smoke` (full surface, GPU): ProRes .mov → decode → masklet → 5 mattes,
   per-frame IoU 0.92–0.98, **measured peak 1.07 GB @ 5f / 1.79 GB @ 30f** (~0.9 GB fixed + ~30 MB/frame).
   Weights republished mlx-community/EdgeTAM-fp16 (874 tensors, fp16 round-trip validated for video).
-  Remaining: multi-object (additive); long-clip streaming (don't pre-stack frames) for >35-frame clips.
+
+- **P3-video ENHANCEMENT(v2) — multi-object + box + streaming DONE 2026-06-25.** All three additive, NO
+  contract bump (still 1.11.0).
+  - **Multi-object**: `EdgeTAMModel.propagate` / `EdgeTAMVideoPredictor.track` take `[ObjectPrompt]`, share
+    the per-frame RepViT+FPN encode ONCE, run a per-object memory bank + decode + memory-encode → one track
+    per object. SURFACE = request-per-object (one `TrackObjectRequest` = one object; the contract's documented
+    "lane-ready" interpretation), or drive `track(frames:objects:)` directly for the shared-encode win in one
+    pass. `edgetam-video-smoke` 2-object case: boy+girl min-IoU **0.9186**; **object-0 (boy) under the
+    shared-encode multi-object pass == the single-object track bit-for-bit (independence IoU 1.0000)**.
+  - **Box prompt**: `req.box` wired `forwardSamHeads`→`embedPrompt` (SAM corner tokens, labels 2/3, +0.5, no
+    not_a_point pad). **Gotcha (SAM2 `_use_multimask`):** a box contributes 2 corner points → exceeds
+    `multimask_max_pt_num=1` → the box-prompted init frame emits the SINGLE (un-ambiguous) mask, not the
+    best-of-3 multimask; tracked frames still multimask. Wiring it as always-multimask gave a wrong f0 (IoU
+    0.70); the single-mask gate fixes it to **f0 0.886 / track min 0.886** vs the box golden.
+  - **Long-clip streaming**: `propagate` pulls frames one at a time, emits each Matte as it lands (PNG-encode +
+    drop the MLX mask), `MLX.GPU.clearCache()` per frame → flat GPU footprint independent of clip length OR
+    object count. `edgetam-video-package-smoke` (full surface, GPU, 5f): boy **0.917** / girl **0.969** /
+    box **0.888**, **peak 1.02 GB**.
+  - Oracle: `run_video_oracle.py` captures `vid_mo_obj{0,1}_f*` (boy reuses single-object run; girl point
+    [400,240]) + `vid_box_f*` (bbox of the boy frame-0 mask). NB: the upstream 2D-perceiver `.view` chokes on
+    batch>1, so the oracle decodes each object in its own B=1 pass (SAM2 memory banks are per-object
+    independent → identical to batched). Remaining: multi-object surface-batching field (deferred to honor
+    "no contract bump"); a future `.rawRGBA16Half` 16-bit step is unrelated.
 
 ## First read: feasible, well-phased, image-mode is the affordable win
 54 MB, Apache, CoreML-proven on Apple HW, and the hard part (video memory) is cleanly separable from a

@@ -82,20 +82,21 @@ public final class EdgeTAMPackage: ModelPackage {
 
     // MARK: trackObject (video masklet)
 
-    // ENHANCEMENT(v2) — scheduled near-future pass on trackObject. Three known limitations, all additive
-    // (no contract bump needed; the request is already lane-ready):
-    //   1. MULTI-OBJECT (priority). V1 tracks ONE object (one prompt set → one Matte track). SAM2 supports
-    //      N obj_ids; extend `EdgeTAMModel.propagate` to a batched object dimension (shared per-frame
-    //      encode, per-object memory bank + decode) and return `[[Matte]]` / interleaved tracks. The
-    //      contract carries this without change (add an obj-grouping field or one request per object).
-    //   2. BOX PROMPT. `req.box` is accepted by the contract but ignored here (V1 = point prompts);
-    //      wire it through `embedPrompt` like the image surface's follow-up.
-    //   3. LONG-CLIP STREAMING. `propagate` pre-stacks all frames and retains every output matte in GPU
-    //      memory (~30 MB/frame → 2 GB footprint caps ~35-frame clips). Stream instead: decode+process
-    //      frame-by-frame, encode each Matte as it lands, `mx.clear_cache()` per step. Flattens the
-    //      footprint to ~fixed and lifts the clip-length ceiling.
+    // ENHANCEMENT(v2) — trackObject hardening. Original three limitations, all additive (no contract bump):
+    //   1. MULTI-OBJECT — DONE in the CORE. `EdgeTAMModel.propagate`/`EdgeTAMVideoPredictor.track` now take
+    //      `[ObjectPrompt]`, share the per-frame RepViT+FPN encode once, and run a per-object memory bank +
+    //      decode + memory-encode → one track per object. SURFACE stays request-per-object: one
+    //      `TrackObjectRequest` = one object's prompt set → one `[Matte]` track, so the contract carries
+    //      multi-object with NO bump (the documented "lane-ready" interpretation — a caller tracking N
+    //      objects issues N requests, or drives `EdgeTAMVideoPredictor.track(frames:objects:)` directly for
+    //      the shared-encode win in one pass). A future additive `objects` grouping field could batch the
+    //      surface end-to-end if a caller needs it; intentionally deferred to honor "prefer no contract bump".
+    //   2. BOX PROMPT — DONE. `req.box` is wired through `forwardSamHeads`→`embedPrompt` (SAM corner tokens).
+    //   3. LONG-CLIP STREAMING — DONE. `propagate` pulls frames one at a time and emits each Matte as it
+    //      lands (PNG-encoded here, MLX mask dropped), `MLX.GPU.clearCache()` per frame → flat GPU footprint.
     private func runTrack(_ req: TrackObjectRequest) async throws -> TrackObjectResponse {
-        guard !req.points.isEmpty else { throw EdgeTAMError.noPrompt }  // V1: point prompts (box = ENHANCEMENT v2 #2)
+        // One object per request (the lane-ready, no-bump multi-object surface): point and/or box prompt.
+        guard !req.points.isEmpty || req.box != nil else { throw EdgeTAMError.noPrompt }
         // Decode the Video bytes to frames (FrameStreamNative, native containers only).
         let frames = try await Self.decodeVideo(req.video)
         guard req.promptFrame >= 0, req.promptFrame < frames.count else {
@@ -103,15 +104,19 @@ public final class EdgeTAMPackage: ModelPackage {
         }
         if videoPredictor == nil { videoPredictor = try await buildVideo() }
         let labels = req.pointLabels.count == req.points.count ? req.pointLabels : Array(repeating: 1, count: req.points.count)
-        let tracked = videoPredictor!.track(frames: frames, clickFrame: req.promptFrame,
-                                            points: req.points, labels: labels)
-        try Task.checkCancellation()
-        var masks: [Matte] = []; masks.reserveCapacity(tracked.count)
-        for fm in tracked {
+        // Stream: each frame's Matte is PNG-encoded and the MLX mask dropped the instant it lands, so the
+        // GPU working set stays flat across long clips (the predictor clears its per-step cache). The only
+        // thing that grows is the output PNG list, which the contract returns in full regardless.
+        var masks: [Matte] = []; masks.reserveCapacity(frames.count)
+        var scores: [Float] = []; scores.reserveCapacity(frames.count)
+        try videoPredictor!.track(frames: frames, clickFrame: req.promptFrame,
+                                  points: req.points, labels: labels, box: req.box) { _, fm in
+            try Task.checkCancellation()
             let png = try Self.encodePNG(EdgeTAMImage.maskCGImage(fm.mask))
             masks.append(Matte(format: .png, data: png, width: fm.mask.dim(1), height: fm.mask.dim(0), kind: .binary))
+            scores.append(fm.score)
         }
-        return TrackObjectResponse(masks: masks, scores: tracked.map { $0.score })
+        return TrackObjectResponse(masks: masks, scores: scores)
     }
 
     // MARK: build / weights

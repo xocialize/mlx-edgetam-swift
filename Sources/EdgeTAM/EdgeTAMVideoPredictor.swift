@@ -29,25 +29,57 @@ public final class EdgeTAMVideoPredictor: @unchecked Sendable {
         public let score: Float     // object-score logit (>0 ≈ present; ≤0 ≈ occluded/absent)
     }
 
-    /// Track a single object across `frames` from point clicks on `clickFrame`. `points` are `[x,y]` in
-    /// source px (foreground/background per `labels`: 1/0); all frames must share the source resolution.
-    /// Returns one `FrameMask` per input frame (same order).
-    public func track(frames: [CGImage], clickFrame: Int = 0, points: [[Float]], labels: [Int]) -> [FrameMask] {
+    /// Preprocess one source frame → `(1,1024,1024,3)` ImageNet-normalized model input.
+    private func preprocess(_ cg: CGImage, origW: Int, origH: Int) -> MLXArray {
+        let rgb = EdgeTAMImage.rgb(from: cg, width: origW, height: origH)
+        let resized = EdgeTAMImage.bilinear(rgb, outH: 1024, outW: 1024)
+        return (resized - mean) / std
+    }
+
+    /// **Streaming multi-object** track (flat GPU footprint). The per-frame encode is shared across every
+    /// object; each `(objIdx, frameMask)` is handed to `emit` the moment it lands — nothing is pre-stacked
+    /// and no output is retained inside the predictor. Each `ObjectPrompt` carries its own point/box (source
+    /// px) + `clickFrame`; all frames must share the source resolution. Pair with a consumer that converts
+    /// each mask out of MLX immediately (e.g. PNG-encode) so the GPU working set never accumulates.
+    public func track(frames: [CGImage], objects: [ObjectPrompt],
+                      emit: (_ objIdx: Int, _ frameIdx: Int, _ frameMask: FrameMask) throws -> Void) rethrows {
         precondition(!frames.isEmpty, "track requires at least one frame")
-        precondition(!points.isEmpty, "track requires at least one point prompt")
+        precondition(!objects.isEmpty, "track requires at least one object")
+        precondition(objects.allSatisfy { !$0.points.isEmpty || $0.box != nil },
+                     "each object needs a point or box prompt")
         let (origW, origH) = (frames[0].width, frames[0].height)
-        // Preprocess each frame → (1,1024,1024,3) ImageNet-norm, stack → (T,1024,1024,3).
-        var pre: [MLXArray] = []
-        pre.reserveCapacity(frames.count)
-        for cg in frames {
-            let rgb = EdgeTAMImage.rgb(from: cg, width: origW, height: origH)
-            let resized = EdgeTAMImage.bilinear(rgb, outH: 1024, outW: 1024)
-            pre.append((resized - mean) / std)
-        }
-        let stacked = MLX.concatenated(pre, axis: 0)                    // (T,1024,1024,3)
-        let (logits, scores) = model.propagate(frames: stacked, clickFrame: clickFrame,
-                                               points: points, labels: labels, origH: origH, origW: origW)
-        return zip(logits, scores).map { FrameMask(mask: ($0.0 .> 0), logits: $0.0, score: $0.1) }
+        try model.propagate(frameCount: frames.count, objects: objects, origH: origH, origW: origW,
+                             frame: { preprocess(frames[$0], origW: origW, origH: origH) },
+                             emit: { o, idx, logits, score in
+                                 try emit(o, idx, FrameMask(mask: (logits .> 0), logits: logits, score: score))
+                             })
+    }
+
+    /// **Streaming single-object** track (point and/or box). Keeps the original `(clickFrame, points,
+    /// labels)` call site; `box` is `[x0,y0,x1,y1]` in source px. Delegates to the multi-object core.
+    public func track(frames: [CGImage], clickFrame: Int = 0, points: [[Float]] = [], labels: [Int] = [],
+                      box: [Float]? = nil,
+                      emit: (_ frameIdx: Int, _ frameMask: FrameMask) throws -> Void) rethrows {
+        try track(frames: frames,
+                  objects: [ObjectPrompt(clickFrame: clickFrame, points: points, labels: labels, box: box)],
+                  emit: { _, idx, fm in try emit(idx, fm) })
+    }
+
+    /// Collecting single-object convenience → one `FrameMask` per input frame (same order). Holds every
+    /// mask in memory — for the flat-footprint path, use an `emit:` overload and convert each mask as it lands.
+    public func track(frames: [CGImage], clickFrame: Int = 0, points: [[Float]] = [], labels: [Int] = [],
+                      box: [Float]? = nil) -> [FrameMask] {
+        var out: [FrameMask] = []; out.reserveCapacity(frames.count)
+        track(frames: frames, clickFrame: clickFrame, points: points, labels: labels, box: box) { _, fm in out.append(fm) }
+        return out
+    }
+
+    /// Collecting multi-object convenience → one `[FrameMask]` track per object (object order preserved).
+    public func track(frames: [CGImage], objects: [ObjectPrompt]) -> [[FrameMask]] {
+        var out = [[FrameMask]](repeating: [], count: objects.count)
+        for i in out.indices { out[i].reserveCapacity(frames.count) }
+        track(frames: frames, objects: objects) { o, _, fm in out[o].append(fm) }
+        return out
     }
 
     /// Convenience: per-frame mask overlays as opaque RGB `CGImage`s (white = object).

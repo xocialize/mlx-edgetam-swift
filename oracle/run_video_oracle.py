@@ -126,6 +126,64 @@ def main():
         cov = (masks[fidx] > 0).mean() * 100
         print(f"  frame {fidx}: coverage {cov:.2f}%")
 
+    # ------------------------------------------------------------------ ENHANCEMENT(v2) goldens
+    # The op-level hooks above already captured the single-object goldens (guarded `if k not in cap`),
+    # so these extra runs reuse `pred` without disturbing them. We only save propagated masks.
+    capture_multi_object(pred, tmp, g, single_masks=masks)
+    capture_box_prompt(pred, tmp, g, single_masks=masks)
+
+
+def capture_multi_object(pred, tmp, g, single_masks):
+    """Multi-object goldens: object 0 = boy [210,350], object 1 = girl [400,240]. SAM2's per-object memory
+    banks are independent (only the image encode is shared & deterministic), so each object's track is
+    identical whether decoded batched or alone — and the upstream 2D-perceiver `.view` chokes on batch>1.
+    So capture each object via its own B=1 propagate: object 0 IS the single-object boy run (reused
+    byte-for-byte); object 1 is a fresh girl run. Saves vid_mo_obj{0,1}_f{f}.npy. The Swift smoke runs both
+    objects through ONE shared-encode multi-object pass and matches these per-object goldens."""
+    # object 0 (boy) — reuse the single-object masks verbatim.
+    for fidx, m in single_masks.items():
+        np.save(f"{g}/vid_mo_obj0_f{fidx}.npy", m)
+    # object 1 (girl) — its own propagate.
+    state = pred.init_state(video_path=tmp)
+    pred.add_new_points_or_box(state, frame_idx=0, obj_id=1,
+                               points=np.array([[400, 240]], np.float32), labels=np.array([1], np.int32))
+    girl = {}
+    for fidx, obj_ids, mask_logits in pred.propagate_in_video(state):
+        girl[fidx] = mask_logits.detach().cpu().numpy()      # (1,1,H,W)
+    for fidx, m in girl.items():
+        np.save(f"{g}/vid_mo_obj1_f{fidx}.npy", m)
+    print(f"[vid-oracle] multi-object: obj0(boy) f0 cov {(single_masks[0]>0).mean()*100:.2f}%  "
+          f"obj1(girl) f0 cov {(girl[0]>0).mean()*100:.2f}%")
+    for fidx in sorted(girl):
+        c0 = (single_masks[fidx] > 0).mean() * 100; c1 = (girl[fidx] > 0).mean() * 100
+        print(f"  f{fidx}: boy {c0:.2f}%  girl {c1:.2f}%")
+
+
+def capture_box_prompt(pred, tmp, g, single_masks):
+    """Box prompt (ENHANCEMENT v2 #2): use the bbox of the single-object frame-0 mask as a box prompt on
+    a fresh state, propagate, save vid_box_f{f}.npy. Validates the box→corner-token path produces a
+    track close to the point-prompted one."""
+    m0 = (single_masks[0][0, 0] > 0)            # (H,W) bool
+    ys, xs = np.where(m0)
+    box = np.array([xs.min(), ys.min(), xs.max(), ys.max()], np.float32)
+    np.save(f"{g}/vid_box_xyxy.npy", box)
+    state = pred.init_state(video_path=tmp)
+    pred.add_new_points_or_box(state, frame_idx=0, obj_id=1, box=box)
+    bmasks = {}
+    for fidx, obj_ids, mask_logits in pred.propagate_in_video(state):
+        bmasks[fidx] = mask_logits.detach().cpu().numpy()
+    for fidx, m in bmasks.items():
+        np.save(f"{g}/vid_box_f{fidx}.npy", m)
+    f0_iou = _iou(bmasks[0][0, 0] > 0, single_masks[0][0, 0] > 0)
+    print(f"[vid-oracle] box prompt: bbox {box.tolist()}  f0 cov {(bmasks[0]>0).mean()*100:.2f}%  "
+          f"vs point-prompt IoU {f0_iou:.4f}")
+
+
+def _iou(a, b):
+    a = a.ravel(); b = b.ravel()
+    inter = (a & b).sum(); uni = (a | b).sum()
+    return float(inter) / float(uni) if uni else 1.0
+
 
 if __name__ == "__main__":
     main()

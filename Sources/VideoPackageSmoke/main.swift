@@ -43,40 +43,48 @@ struct VideoPackageSmoke: AsyncParsableCommand {
         // Drive the package surface.
         let cfg = EdgeTAMConfiguration(quant: .fp32, weightsURL: URL(fileURLWithPath: weights))
         let pkg = EdgeTAMPackage(configuration: cfg)
+        let video = Video(format: .mov, data: videoBytes)
+        let fx = try MLX.loadArrays(url: URL(fileURLWithPath: parity)).mapValues { $0.asType(.float32) }
+        let nGold = 5
+
+        // Drive ONE TrackObjectRequest (the request-per-object multi-object surface) and score it per-frame
+        // vs `goldPrefix`_f{i}. Returns (minIoU, seconds). Codec-tolerant: ProRes encode/decode drifts a few px.
+        func track(_ label: String, points: [[Float]], box: [Float]?, goldPrefix: String) async throws -> Float {
+            let req = TrackObjectRequest(video: video, promptFrame: 0, points: points,
+                                         pointLabels: Array(repeating: 1, count: points.count), box: box)
+            let resp = try await pkg.run(req)
+            guard let r = resp as? TrackObjectResponse, r.masks.count == cgs.count else { throw ExitCode(1) }
+            var minIoU: Float = 1
+            for i in 0 ..< min(nGold, r.masks.count) {
+                guard let goldArr = fx["\(goldPrefix)_f\(i)"] else { continue }
+                let m = r.masks[i]
+                let pred = Self.matteBinary(m.data, width: m.width ?? 0, height: m.height ?? 0)
+                let gold = (goldArr .> 0).asType(.float32)
+                let inter = (pred * gold).sum().item(Float.self)
+                let uni = ((pred + gold) .> 0).asType(.float32).sum().item(Float.self)
+                minIoU = min(minIoU, uni > 0 ? inter / uni : 1)
+            }
+            let lbl = label.padding(toLength: 22, withPad: " ", startingAt: 0)
+            print("[vpkg] \(lbl) " + String(format: "min_IoU=%.4f  score f0=%.3f", minIoU, r.scores[0]))
+            return minIoU
+        }
+
+        // Object 0 (the CLI point, default boy) — measure peak + timing on this primary request.
         let c = point.split(separator: ",").map { Float($0)! }
-        let req = TrackObjectRequest(video: Video(format: .mov, data: videoBytes),
-                                     promptFrame: 0, points: [[c[0], c[1]]], pointLabels: [1])
         MLX.GPU.resetPeakMemory()
         let start = Date()
-        let resp = try await pkg.run(req)
+        let boyIoU = try await track("obj0 point", points: [[c[0], c[1]]], box: nil, goldPrefix: "mask")
         let secs = Date().timeIntervalSince(start)
-        guard let r = resp as? TrackObjectResponse else { throw ExitCode(1) }
+        // Object 1 (girl) — a second request, the request-per-object multi-object lane.
+        let girlIoU = try await track("obj1 point (girl)", points: [[400, 240]], box: nil, goldPrefix: "mo_obj1")
+        // Box prompt — points empty, box only (ENHANCEMENT v2 #2).
+        let bx = fx["box_xyxy"]!
+        let box: [Float] = (0 ..< 4).map { bx[$0].item(Float.self) }
+        let boxIoU = try await track("box prompt", points: [], box: box, goldPrefix: "box")
 
-        guard r.masks.count == cgs.count, r.scores.count == cgs.count else {
-            print("[vpkg] FAIL: masks=\(r.masks.count) scores=\(r.scores.count) expected \(cgs.count)")
-            throw ExitCode(1)
-        }
-        // Per-frame IoU vs goldens (codec-tolerant threshold).
-        let fx = try MLX.loadArrays(url: URL(fileURLWithPath: parity)).mapValues { $0.asType(.float32) }
-        var minIoU: Float = 1
-        for i in 0 ..< r.masks.count {
-            let m = r.masks[i]
-            guard let goldArr = fx["mask_f\(i)"] else {       // goldens cover only f0..4
-                print(String(format: "[vpkg] f%d  score=%.3f  matte %dx%d  (no golden)", i, r.scores[i],
-                             m.width ?? 0, m.height ?? 0)); continue
-            }
-            let pred = Self.matteBinary(m.data, width: m.width ?? 0, height: m.height ?? 0)
-            let gold = (goldArr .> 0).asType(.float32)
-            let inter = (pred * gold).sum().item(Float.self)
-            let uni = ((pred + gold) .> 0).asType(.float32).sum().item(Float.self)
-            let iou = uni > 0 ? inter / uni : 1
-            minIoU = min(minIoU, iou)
-            print(String(format: "[vpkg] f%d  IoU=%.4f  score=%.3f  matte %dx%d", i, iou, r.scores[i],
-                         m.width ?? 0, m.height ?? 0))
-        }
-        let ok = minIoU > 0.80
-        print(String(format: "[vpkg] trackObject end-to-end  min_IoU=%.4f thr=0.80  (%.2fs, peak %.2f GB)  %@",
-                     minIoU, secs, Double(MLX.GPU.peakMemory) / 1e9, ok ? "OK ✅" : "FAIL ❌"))
+        let ok = boyIoU > 0.80 && girlIoU > 0.80 && boxIoU > 0.80
+        print(String(format: "[vpkg] trackObject end-to-end  boy=%.3f girl=%.3f box=%.3f thr=0.80  (boy %.2fs, peak %.2f GB)  %@",
+                     boyIoU, girlIoU, boxIoU, secs, Double(MLX.GPU.peakMemory) / 1e9, ok ? "OK ✅" : "FAIL ❌"))
         if !ok { throw ExitCode(1) }
     }
 

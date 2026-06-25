@@ -13,6 +13,21 @@ import MLX
 /// Config (edgetam.yaml): num_maskmem=7, mem_dim=64, hidden=256, feat 64×64, image 1024, stride=1,
 /// directly_add_no_mem_embed, sigmoid_scale 20 / bias −10, multimask_output_for_tracking,
 /// use_multimask_token_for_obj_ptr, fixed_no_obj_ptr, only_obj_ptrs_in_the_past.
+
+/// One tracked object's prompt for the multi-object propagate/track path: a point set and/or a box, given
+/// on `clickFrame`. Coordinates are in **original-video px** (the propagate/track layer normalizes to the
+/// 1024² model space). Each object carries its own independent memory bank; the per-frame RepViT+FPN
+/// encode is shared across all objects (SAM2's image features don't depend on the prompt).
+public struct ObjectPrompt: Sendable {
+    public let clickFrame: Int      // frame the prompt is given on (forward-only propagation from here)
+    public let points: [[Float]]    // [x,y] in original-video px (may be empty if `box` is set)
+    public let labels: [Int]        // per-point: 1 = foreground / 0 = background
+    public let box: [Float]?        // optional [x0,y0,x1,y1] in original-video px
+    public init(clickFrame: Int = 0, points: [[Float]] = [], labels: [Int] = [], box: [Float]? = nil) {
+        self.clickFrame = clickFrame; self.points = points; self.labels = labels; self.box = box
+    }
+}
+
 extension EdgeTAMModel {
 
     // MARK: - Stored per-frame memory (the memory bank entries)
@@ -211,14 +226,20 @@ extension EdgeTAMModel {
 
     // MARK: - Tracking SAM head (multimask + object-score gate + obj_ptr)
     /// `backbone` NHWC `(1,64,64,256)`, `featS0 (1,256,256,32)`, `featS1 (1,128,128,64)`.
-    /// `coordsPx==nil` → empty prompt (2 not-a-point tokens). Always multimask (best-by-IoU of 3).
-    /// → (lowResBest `(1,1,256,256)`, objPtr `(1,256)`, objScore Float).
+    /// All prompts nil (`coordsPx`/`labels`/`boxPx`) → empty prompt (2 not-a-point tokens), the
+    /// propagated-frame path. `boxPx` is `[x0,y0,x1,y1]` in model (1024²) space. `multimask` true → pick
+    /// best-by-IoU of the 3 multi-masks (SAM2's `_use_multimask` on ≤1 prompt point / tracked frames);
+    /// false → the single un-ambiguous mask (token 0), used on a box / multi-point prompt frame where SAM2
+    /// exceeds `multimask_max_pt_num`. → (lowResBest `(1,1,256,256)`, objPtr `(1,256)`, objScore Float).
     public func forwardSamHeads(_ backbone: MLXArray, _ featS0: MLXArray, _ featS1: MLXArray,
-                         coordsPx: MLXArray?, labels: [Int]?) -> (MLXArray, MLXArray, Float) {
+                         coordsPx: MLXArray?, labels: [Int]?, boxPx: [Float]? = nil,
+                         multimask: Bool = true) -> (MLXArray, MLXArray, Float) {
         let D = "sam_mask_decoder"
         let (sparse, dense): (MLXArray, MLXArray) = {
-            if let coordsPx, let labels { return embedPrompt(coordsPx, labels) }
-            return embedPrompt(MLXArray.zeros([1, 2]), [-1])            // → 2 not-a-point tokens
+            if (coordsPx != nil && labels != nil) || boxPx != nil {
+                return embedPrompt(coordsPx ?? MLXArray.zeros([0, 2]), labels ?? [], box: boxPx)
+            }
+            return embedPrompt(MLXArray.zeros([1, 2]), [-1])           // → 2 not-a-point tokens
         }()
         let outTokens = MLX.concatenated([a(D + ".obj_score_token.weight"), a(D + ".iou_token.weight"),
                                           a(D + ".mask_tokens.weight")], axis: 0).reshaped([1, 6, 256])
@@ -236,16 +257,15 @@ extension EdgeTAMModel {
         let (H, Wd) = (u.dim(1), u.dim(2))
         let masks = MLX.matmul(hyper, u.reshaped([1, H * Wd, 32]).transposed(0, 2, 1)).reshaped([1, 4, H, Wd])
         let iou = MLX.sigmoid(mlpHead(iouTok, D + ".iou_prediction_head", 3))     // (1,4)
-        // multimask: drop index 0 → 3 candidates; object-score hard-gate (NO_OBJ_SCORE −1024)
+        // Token layout: index 0 = the single (un-ambiguous) mask, 1..3 = the 3 multi-masks. multimask →
+        // best-by-IoU of 1..3; else the single mask at index 0. Object-score hard-gate (NO_OBJ_SCORE −1024).
         let scoreF = objScore.item(Float.self)
         let isObj = scoreF > 0
-        var masksM = masks[0..., 1 ..< 4, 0..., 0...]                   // (1,3,256,256)
-        if !isObj { masksM = MLX.zeros(like: masksM) - 1024.0 }
-        let iouM = iou[0..., 1 ..< 4]
-        let best = MLX.argMax(iouM[0], axis: -1).item(Int.self)
-        let lowResBest = masksM[0..., best ..< (best + 1), 0..., 0...]  // (1,1,256,256)
-        // obj_ptr from best multimask token → 3-MLP → fixed_no_obj_ptr gate
-        let samTok = maskToks[0..., 1 ..< 4, 0...][0..., best, 0...]    // (1,256)
+        let sel: Int = multimask ? 1 + MLX.argMax(iou[0..., 1 ..< 4][0], axis: -1).item(Int.self) : 0
+        var lowResBest = masks[0..., sel ..< (sel + 1), 0..., 0...]     // (1,1,256,256)
+        if !isObj { lowResBest = MLX.zeros(like: lowResBest) - 1024.0 }
+        // obj_ptr from the selected mask token → 3-MLP → fixed_no_obj_ptr gate
+        let samTok = maskToks[0..., sel, 0...]                          // (1,256)
         var objPtr = mlpHead(samTok, "obj_ptr_proj", 3)
         if !isObj { objPtr = a("no_obj_ptr") }                          // lam=is_obj (hard); obj_ptr = lam·ptr + (1−lam)·no_obj_ptr
         return (lowResBest, objPtr, scoreF)
@@ -292,68 +312,137 @@ extension EdgeTAMModel {
         return (memory, memoryPos, numSpatial, numObjPtr)
     }
 
-    // MARK: - Propagate (single object, click on `clickFrame`)
-    // ENHANCEMENT(v2): SINGLE OBJECT + PRE-STACKED frames. Multi-object → add a batched object axis (one
-    // memory bank per object, shared per-frame encode). Long clips → process frame-by-frame instead of
-    // taking the whole `(T,…)` stack + accumulating all masks (stream out + `clear_cache` per step). See
-    // the EnhancementBlock at `EdgeTAMPackage.runTrack`.
-    /// `frames` NHWC `(T,1024,1024,3)` (ImageNet-normalized). `points` are `[x,y]` in original-video px
-    /// (foreground/background per `labels`: 1/0), prompting on `clickFrame`. Returns per-frame mask logits
-    /// `(origH,origW)`.
-    public func propagate(frames: MLXArray, clickFrame: Int, points: [[Float]], labels: [Int],
-                          origH: Int, origW: Int) -> (masks: [MLXArray], scores: [Float]) {
-        let T = frames.dim(0)
+    // MARK: - Propagate (multi-object, streaming)
+    // ENHANCEMENT(v2) status: MULTI-OBJECT + LONG-CLIP STREAMING both landed here. Each object carries its
+    // own memory bank (cond/noncond `FrameMemory`); the per-frame RepViT+FPN encode is done ONCE and shared
+    // across all objects (SAM2's image features are prompt-independent). Frames are pulled one at a time and
+    // each (object,frame) mask is emitted (then released) as it lands, so the GPU working set stays flat
+    // regardless of clip length OR object count. The per-object memory banks (~0.26 MB/frame each) are the
+    // only thing that grows. Box prompts wire through `forwardSamHeads`/`embedPrompt`. See the
+    // EnhancementBlock at `EdgeTAMPackage.runTrack`.
+
+    /// **Streaming multi-object masklet propagation** (flat GPU footprint). Pulls one preprocessed frame at
+    /// a time via `frame(t)` (NHWC `(1,1024,1024,3)`, ImageNet-normalized), shares the RepViT+FPN encode
+    /// across every object, and hands each `(objIdx, frameIdx)` output mask logits `(origH,origW)` +
+    /// object-score back through `emit` the instant it lands — nothing is pre-stacked and no per-frame
+    /// output is retained here. Each `ObjectPrompt` has its own click/box (original-video px) and `clickFrame`.
+    ///
+    /// Propagation is forward-only: an object's track is empty (`-1024` score, zero mask) on frames before
+    /// its `clickFrame`. Flat-footprint discipline (cf. the scail-2 long-run cache lesson): each step
+    /// `eval()`s every object's output mask **and** new memory-bank entry, hands the masks out via `emit`,
+    /// then a single `MLX.GPU.clearCache()` per frame drops the transient working set. Peak ≈ one frame's
+    /// shared encode + O object forwards + the tiny per-object memory banks.
+    public func propagate(frameCount T: Int, objects: [ObjectPrompt], origH: Int, origW: Int,
+                          frame: (Int) -> MLXArray,
+                          emit: (_ objIdx: Int, _ frameIdx: Int, _ mask: MLXArray, _ score: Float) throws -> Void) rethrows {
+        let O = objects.count
         let noMem = a("no_mem_embed").reshaped([1, 1, 1, 256])
         let currPos = Self.posSine(256, 64, 64).reshaped([4096, 1, 256])
         let maskmemPos = Self.posSine(64, 64, 64).reshaped([1, 64, 64, 64])
-        var cond: [FrameMemory] = []
-        var noncond: [Int: FrameMemory] = [:]
-        var masks: [MLXArray] = []
-        var scores: [Float] = []
+        var cond = [[FrameMemory]](repeating: [], count: O)
+        var noncond = [[Int: FrameMemory]](repeating: [:], count: O)
+
+        // Normalize each object's prompt from original-video px → 1024² model space once.
+        func scale(_ x: Float, _ orig: Int) -> Float { x / Float(orig) * 1024 }
+        let clicks: [MLXArray?] = objects.map { obj in
+            guard !obj.points.isEmpty else { return nil }
+            return MLXArray(obj.points.flatMap { [scale($0[0], origW), scale($0[1], origH)] }, [obj.points.count, 2])
+        }
+        let boxes: [[Float]?] = objects.map { obj in
+            guard let b = obj.box else { return nil }
+            return [scale(b[0], origW), scale(b[1], origH), scale(b[2], origW), scale(b[3], origH)]
+        }
 
         for t in 0 ..< T {
-            let input = frames[t ..< (t + 1)]                           // (1,1024,1024,3)
+            // --- Shared per-frame encode (RepViT + FPN), done ONCE, reused by every object. ---
+            let input = frame(t)                                        // (1,1024,1024,3), built on demand
             let (imageEmbed, fpn0, fpn1) = encode(input)               // imageEmbed = out2 + no_mem
             let rawFeat = imageEmbed - noMem                            // (1,64,64,256) memory-encoder feat
             let featS0 = conv(fpn0, "sam_mask_decoder.conv_s0.weight", b: "sam_mask_decoder.conv_s0.bias")
             let featS1 = conv(fpn1, "sam_mask_decoder.conv_s1.weight", b: "sam_mask_decoder.conv_s1.bias")
+            let currSeq = rawFeat.reshaped([1, 4096, 256]).transposed(1, 0, 2)  // (4096,1,256) shared MA query
 
-            let isInit = (t == clickFrame)
-            let backbone: MLXArray
-            if isInit {
-                backbone = imageEmbed                                   // directly_add_no_mem_embed
-            } else {
-                let (memory, memoryPos, numSpatial, numObjPtr) =
-                    assembleMemory(t, cond, noncond, numFrames: T)
-                let currSeq = rawFeat.reshaped([1, 4096, 256]).transposed(1, 0, 2)  // (4096,1,256)
-                let maOut = memoryAttention(currSeq, currPos, memory, memoryPos,
-                                            numObjPtr: numObjPtr, numSpatial: numSpatial)
-                backbone = maOut.reshaped([1, 64, 64, 256])
+            for o in 0 ..< O {
+                let obj = objects[o]
+                let isInit = (t == obj.clickFrame)
+                // Forward-only: before this object's prompt frame it is absent → emit an empty mask.
+                if !isInit && cond[o].isEmpty && noncond[o].isEmpty {
+                    let empty = MLXArray.zeros([origH, origW])
+                    empty.eval()
+                    try emit(o, t, empty, -1024)
+                    continue
+                }
+                let backbone: MLXArray
+                if isInit {
+                    backbone = imageEmbed                               // directly_add_no_mem_embed
+                } else {
+                    let (memory, memoryPos, numSpatial, numObjPtr) =
+                        assembleMemory(t, cond[o], noncond[o], numFrames: T)
+                    let maOut = memoryAttention(currSeq, currPos, memory, memoryPos,
+                                                numObjPtr: numObjPtr, numSpatial: numSpatial)
+                    backbone = maOut.reshaped([1, 64, 64, 256])
+                }
+                // SAM2 `_use_multimask`: a box contributes 2 (corner) points → on a box / multi-point init
+                // frame num_pts exceeds multimask_max_pt_num=1 → single mask; tracked frames always multimask.
+                let numPts = obj.points.count + (obj.box != nil ? 2 : 0)
+                let (lowResBest, objPtr, objScore) = forwardSamHeads(
+                    backbone, featS0, featS1,
+                    coordsPx: isInit ? clicks[o] : nil,
+                    labels: isInit ? obj.labels : nil,
+                    boxPx: isInit ? boxes[o] : nil,
+                    multimask: isInit ? (numPts <= 1) : true)
+
+                // Encode new memory: high-res (1024) mask → sigmoid·20−10 → mem-encoder → perceiver compress.
+                let lrNHWC = lowResBest.transposed(0, 2, 3, 1)          // (1,256,256,1)
+                let hiRes = EdgeTAMImage.bilinear(lrNHWC, outH: 1024, outW: 1024)
+                let maskForMem = MLX.sigmoid(hiRes) * 20.0 - 10.0
+                let maskmem = memoryEncoder(rawFeat, maskForMem)        // (1,64,64,64); no_obj_embed_spatial absent
+                let (spatial, spatialPos) = perceiver(maskmem, maskmemPos) // (1,512,64),(1,512,64)
+                let fm = FrameMemory(spatial: spatial[0], spatialPos: spatialPos[0], objPtr: objPtr[0],
+                                     frameIdx: t, isCond: isInit)
+                if isInit { cond[o].append(fm) } else { noncond[o][t] = fm }
+
+                // Output mask at original video resolution. Materialize this object's output AND its
+                // persisted memory-bank entry so the lazy graph does not chain across frames/objects.
+                let full = EdgeTAMImage.bilinear(lrNHWC, outH: origH, outW: origW)[0, 0..., 0..., 0]
+                MLX.eval(full, fm.spatial, fm.spatialPos, fm.objPtr)
+                try emit(o, t, full, objScore)
             }
-            // Clicks are in original video px → normalize by (W,H) then scale to the 1024 model space.
-            let scaled = points.flatMap { [$0[0] / Float(origW) * 1024, $0[1] / Float(origH) * 1024] }
-            let clickPx = MLXArray(scaled, [points.count, 2])
-            let (lowResBest, objPtr, objScore) = forwardSamHeads(
-                backbone, featS0, featS1,
-                coordsPx: isInit ? clickPx : nil,
-                labels: isInit ? labels : nil)
-
-            // Encode new memory: high-res (1024) mask → sigmoid·20−10 → mem-encoder → perceiver compress.
-            let lrNHWC = lowResBest.transposed(0, 2, 3, 1)              // (1,256,256,1)
-            let hiRes = EdgeTAMImage.bilinear(lrNHWC, outH: 1024, outW: 1024)
-            let maskForMem = MLX.sigmoid(hiRes) * 20.0 - 10.0
-            let maskmem = memoryEncoder(rawFeat, maskForMem)           // (1,64,64,64); no_obj_embed_spatial absent
-            let (spatial, spatialPos) = perceiver(maskmem, maskmemPos) // (1,512,64),(1,512,64)
-            let fm = FrameMemory(spatial: spatial[0], spatialPos: spatialPos[0], objPtr: objPtr[0],
-                                 frameIdx: t, isCond: isInit)
-            if isInit { cond.append(fm) } else { noncond[t] = fm }
-
-            // Output mask at original video resolution.
-            let full = EdgeTAMImage.bilinear(lrNHWC, outH: origH, outW: origW)[0, 0..., 0..., 0]
-            full.eval()
-            masks.append(full)
-            scores.append(objScore)
+            MLX.GPU.clearCache()                                        // drop the frame's transient working set
         }
-        return (masks, scores)
+    }
+
+    /// **Streaming single-object** convenience — one `ObjectPrompt`, `emit` without the object index.
+    /// Keeps the existing `(clickFrame, points, labels[, box])` call site; delegates to the multi-object core.
+    public func propagate(frameCount T: Int, clickFrame: Int, points: [[Float]], labels: [Int],
+                          box: [Float]? = nil, origH: Int, origW: Int,
+                          frame: (Int) -> MLXArray,
+                          emit: (_ frameIdx: Int, _ mask: MLXArray, _ score: Float) throws -> Void) rethrows {
+        try propagate(frameCount: T,
+                      objects: [ObjectPrompt(clickFrame: clickFrame, points: points, labels: labels, box: box)],
+                      origH: origH, origW: origW, frame: frame,
+                      emit: { _, idx, m, s in try emit(idx, m, s) })
+    }
+
+    /// Back-compat stacked multi-object entry point (parity / VideoSmoke): pre-stacked `frames` NHWC
+    /// `(T,1024,1024,3)` in, one collected `(masks,scores)` track per object out. Delegates to the streaming
+    /// core — same numerics — but retains every output, so it does NOT have the flat footprint.
+    public func propagate(frames: MLXArray, objects: [ObjectPrompt], origH: Int, origW: Int)
+        -> [(masks: [MLXArray], scores: [Float])] {
+        let O = objects.count
+        var masks = [[MLXArray]](repeating: [], count: O)
+        var scores = [[Float]](repeating: [], count: O)
+        propagate(frameCount: frames.dim(0), objects: objects, origH: origH, origW: origW,
+                  frame: { frames[$0 ..< ($0 + 1)] },
+                  emit: { o, _, m, s in masks[o].append(m); scores[o].append(s) })
+        return (0 ..< O).map { (masks[$0], scores[$0]) }
+    }
+
+    /// Back-compat stacked single-object entry point. Delegates to the multi-object stacked form.
+    public func propagate(frames: MLXArray, clickFrame: Int, points: [[Float]], labels: [Int],
+                          box: [Float]? = nil, origH: Int, origW: Int) -> (masks: [MLXArray], scores: [Float]) {
+        propagate(frames: frames,
+                  objects: [ObjectPrompt(clickFrame: clickFrame, points: points, labels: labels, box: box)],
+                  origH: origH, origW: origW)[0]
     }
 }
