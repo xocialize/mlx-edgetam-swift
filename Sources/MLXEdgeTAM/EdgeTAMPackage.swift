@@ -24,13 +24,17 @@ public final class EdgeTAMPackage: ModelPackage {
             provenance: Provenance(sourceRepo: "mlx-community/EdgeTAM-fp16", revision: "main", tier: 2),
             requirements: RequirementsManifest(
                 // Image-mode measured (M-Max, 1800×1200 source, fp32): peak 0.42 GB — EdgeTAM is
-                // on-device-tiny (54 MB, RepViT encoder @ fixed 1024²). trackObject runs the same
-                // per-frame forward sequentially; its working set scales with clip length — MEASURED on
-                // GPU (960×540 source, fp32): 5 frames = 1.07 GB, 30 frames = 1.79 GB → ~0.9 GB fixed +
-                // ~30 MB/frame (stacked input + retained per-frame mattes + memory bank + buffer cache).
-                // The 2 GB envelope covers ~35-frame clips; longer clips want streaming (don't pre-stack
-                // frames, encode mattes incrementally, mx.clear_cache per step) — a V2 optimization.
-                footprints: [QuantFootprint(quant: .fp16, residentBytes: 2_000_000_000)],
+                // on-device-tiny (54 MB, RepViT encoder @ fixed 1024²). trackObject runs the same per-frame
+                // forward sequentially and now STREAMS it (ENHANCEMENT v2 #3): frames are pulled one at a
+                // time, each Matte is emitted+dropped as it lands, and mx.clear_cache() runs per frame — so
+                // the GPU working set is FLAT in clip length. MEASURED on GPU (960×540 source, fp32, the
+                // streaming propagate core): 5f = 1.00 GB, 30f = 1.02 GB, 60f = 1.03 GB, 120f = 1.04 GB →
+                // ~1.0 GB fixed + ~0.37 MB/frame (the only thing that grows is the tiny per-frame memory
+                // bank: spatial 512×64 + objPtr; the old stacked path was ~30 MB/frame). The 1.5 GB envelope
+                // now covers very long clips (~1000+ frames) with headroom for HD sources; multi-object adds
+                // a memory bank + decode per object but shares the per-frame encode, so each object tracked
+                // in one pass adds only its own ~0.37 MB/frame.
+                footprints: [QuantFootprint(quant: .fp16, residentBytes: 1_500_000_000)],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0))
             ),

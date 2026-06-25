@@ -13,8 +13,11 @@ struct VideoSmoke: ParsableCommand {
 
     @Option(name: .long) var weights: String
     @Option(name: .long, help: "parity_video.safetensors") var parity: String
+    @Option(name: .long, help: "GPU flat-footprint measurement: cycle the 5 embedded frames to N, stream through propagate, report MLX.GPU.peakMemory (0 = CPU parity gate).")
+    var measureFrames: Int = 0
 
     func run() throws {
+        if measureFrames > 0 { try measure(n: measureFrames); return }
         Device.setDefault(device: Device(.cpu))
         let w = try MLX.loadArrays(url: URL(fileURLWithPath: weights)).mapValues { $0.asType(.float32) }
         let fx = try MLX.loadArrays(url: URL(fileURLWithPath: parity)).mapValues { $0.asType(.float32) }
@@ -148,5 +151,39 @@ struct VideoSmoke: ParsableCommand {
 
         if failed { throw ExitCode(1) }
         print("[vid-smoke] ALL P2 PARITY GATES PASSED ✅")
+    }
+
+    /// GPU flat-footprint measurement (fp32, default Metal device — same methodology as the historical
+    /// 5f=1.07GB / 30f=1.79GB stacked numbers). Cycles the 5 embedded `(1024,1024,3)` frames to `n` and
+    /// drives the STREAMING `propagate(frameCount:frame:emit:)` the package surface uses: `frame(t)` slices
+    /// the small 5-frame source on demand (input memory stays bounded), every emitted mask is reduced to a
+    /// scalar IoU and dropped, and `clear_cache()` runs per frame inside the core. Peak then reflects the
+    /// one-frame working set + the per-frame memory bank only — the flat footprint we're verifying.
+    private func measure(n: Int) throws {
+        let w = try MLX.loadArrays(url: URL(fileURLWithPath: weights)).mapValues { $0.asType(.float32) }
+        let fx = try MLX.loadArrays(url: URL(fileURLWithPath: parity)).mapValues { $0.asType(.float32) }
+        let m = EdgeTAMModel(weights: w)
+        let frames = fx["frames"]!                                        // (5,1024,1024,3) on GPU
+        let (origH, origW) = (fx["mask_f0"]!.dim(0), fx["mask_f0"]!.dim(1))
+        func iou(_ pred: MLXArray, _ goldKey: String) -> Float {
+            let p = (pred .> 0).asType(.float32), gg = (fx[goldKey]! .> 0).asType(.float32)
+            let inter = (p * gg).sum().item(Float.self)
+            let uni = ((p + gg) .> 0).asType(.float32).sum().item(Float.self)
+            return uni > 0 ? inter / uni : 1
+        }
+        MLX.GPU.resetPeakMemory()
+        let start = Date()
+        var minIoU: Float = 1
+        m.propagate(frameCount: n, clickFrame: 0, points: [[210, 350]], labels: [1],
+                    origH: origH, origW: origW,
+                    frame: { frames[($0 % 5) ..< ($0 % 5 + 1)] },          // cycle 5 frames, on demand
+                    emit: { idx, logits, _ in
+                        if idx < 5 { minIoU = min(minIoU, iou(logits, "mask_f\(idx)")) }
+                    })
+        let secs = Date().timeIntervalSince(start)
+        let ok = minIoU > 0.90
+        print(String(format: "[vid-measure] %d frames (fp32, GPU, streaming)  peak=%.3f GB  min_IoU(f0..4)=%.4f  (%.1fs)  %@",
+                     n, Double(MLX.GPU.peakMemory) / 1e9, minIoU, secs, ok ? "OK ✅" : "FAIL ❌"))
+        if !ok { throw ExitCode(1) }
     }
 }
