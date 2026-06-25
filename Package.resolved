@@ -1,5 +1,5 @@
 {
-  "originHash" : "e1529ebd649c4f38f99e01316d479969ce1d60fc1b635213e105d83ff25e9db5",
+  "originHash" : "3dc307a4f5480aa675a34fd7f709a036ed9923b17895a83572b6125378b09e4f",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -11,12 +11,21 @@
       }
     },
     {
+      "identity" : "frame-stream-native",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/frame-stream-native.git",
+      "state" : {
+        "branch" : "27e767f",
+        "revision" : "27e767f5dab7164a4bdd9c20299d239b1582784a"
+      }
+    },
+    {
       "identity" : "mlx-engine-swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/mlx-engine-swift.git",
       "state" : {
-        "branch" : "6aff0f4",
-        "revision" : "6aff0f434190241f72a43f1cbe0c0723fa274546"
+        "branch" : "415c4af",
+        "revision" : "415c4af8c380ca4a0639ec59b6c70d43b3bf33b9"
       }
     },
     {

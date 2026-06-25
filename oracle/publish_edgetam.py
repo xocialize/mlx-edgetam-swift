@@ -22,27 +22,34 @@ tags:
 
 # mlx-community/EdgeTAM-fp16
 
-[EdgeTAM](https://github.com/facebookresearch/EdgeTAM) — on-device SAM 2 for promptable segmentation —
-converted to **Apple MLX** (`-fp16`) for the [`mlx-edgetam-swift`](https://github.com/xocialize/mlx-edgetam-swift)
-Swift package (MLXEngine `promptSegment` ModelPackage). **Image-mode** (point/box → mask); 22× faster
-than SAM 2, 16 FPS on iPhone 15 Pro Max.
+[EdgeTAM](https://github.com/facebookresearch/EdgeTAM) — on-device SAM 2 for promptable segmentation +
+video tracking — converted to **Apple MLX** (`-fp16`) for the
+[`mlx-edgetam-swift`](https://github.com/xocialize/mlx-edgetam-swift) Swift package (MLXEngine
+`promptSegment` + `trackObject` ModelPackage). 22× faster than SAM 2, 16 FPS on iPhone 15 Pro Max.
 
-From-scratch MLX-Swift architecture port: RepViT-M1 image encoder + FPN + SAM prompt encoder + two-way
-mask decoder. Parity-locked vs the PyTorch oracle on the CPU stream (image_embed 9.7e-6, mask logits
-8.9e-5). This `-fp16` build is functionally identical (end-to-end mask **IoU 0.99** vs PyTorch; the
-thresholded mask absorbs fp16 weight-rounding).
+From-scratch MLX-Swift architecture port. **Image-mode** (point/box → mask): RepViT-M1 encoder + FPN +
+SAM prompt encoder + two-way mask decoder — parity-locked vs the PyTorch oracle on the CPU stream
+(image_embed 9.7e-6, mask logits 8.9e-5; end-to-end mask **IoU 0.99** vs PyTorch). **Video-mode**
+(`trackObject`, click on one frame → per-frame masklet): adds the video memory stack — PerceiverResampler
++ MemoryEncoder + MemoryAttention (RoPE-2D) + the SAM2 memory-bank state machine — every op parity-locked
+vs the oracle; full masklet propagation min-IoU 0.92. This single `-fp16` file carries both (874 tensors).
 
 ## Use
 
 ```swift
 // Package.swift → .package(url: "https://github.com/xocialize/mlx-edgetam-swift", from: "0.1.0")
 import EdgeTAM
-let predictor = try EdgeTAMPredictor.fromPretrained(weightsPath, dtype: .float16)
-predictor.setImage(sourceCGImage)
-let (mask, score, _, _) = predictor.predict(point: (500, 375))   // click → object mask
+// Image: click → object mask
+let p = try EdgeTAMPredictor.fromPretrained(weightsPath, dtype: .float16)
+p.setImage(sourceCGImage)
+let (mask, score, _, _) = p.predict(point: (500, 375))
+// Video: click on a frame → per-frame masklet
+let vp = try EdgeTAMVideoPredictor.fromPretrained(weightsPath, dtype: .float16)
+let track = vp.track(frames: cgImages, clickFrame: 0, points: [[210, 350]], labels: [1])
 ```
 
-Or as an MLXEngine `promptSegment` ModelPackage (`MLXEdgeTAM.EdgeTAMPackage`), resolving this repo via the Hub.
+Or as an MLXEngine ModelPackage (`MLXEdgeTAM.EdgeTAMPackage`) — `promptSegment` (image) + `trackObject`
+(video) surfaces — resolving this repo via the Hub.
 
 Weights: Apache-2.0 (facebookresearch/EdgeTAM). Port code: MIT.
 """

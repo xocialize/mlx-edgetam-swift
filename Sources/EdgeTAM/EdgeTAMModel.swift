@@ -6,14 +6,15 @@ import MLX
 /// parity-verified `oracle/mlx_encoder.py` + `oracle/mlx_decoder.py` (image_embed 9.7e-6, masks 8.2e-5).
 public final class EdgeTAMModel: @unchecked Sendable {
 
-    private let w: [String: MLXArray]
+    let w: [String: MLXArray]
     public init(weights: [String: MLXArray]) { self.w = weights }
 
-    private func a(_ k: String) -> MLXArray { w[k]! }                  // convs already NHWC from convert
+    func a(_ k: String) -> MLXArray { w[k]! }                          // convs already NHWC from convert
+    func has(_ k: String) -> Bool { w[k] != nil }
     private static let depths = [2, 2, 14, 2]
 
-    // MARK: primitives
-    private func conv(_ x: MLXArray, _ k: String, b: String? = nil, stride: Int = 1, pad: Int = 0, groups: Int = 1) -> MLXArray {
+    // MARK: primitives (shared with the P2 video extension — see EdgeTAMVideo.swift)
+    func conv(_ x: MLXArray, _ k: String, b: String? = nil, stride: Int = 1, pad: Int = 0, groups: Int = 1) -> MLXArray {
         let y = MLX.conv2d(x, a(k), stride: .init(stride), padding: .init(pad), groups: groups)
         return b == nil ? y : y + a(b!)
     }
@@ -23,13 +24,14 @@ public final class EdgeTAMModel: @unchecked Sendable {
     private func cn(_ x: MLXArray, _ p: String, stride: Int = 1, pad: Int = 0, groups: Int = 1) -> MLXArray {
         bnEval(conv(x, p + ".c.weight", stride: stride, pad: pad, groups: groups), p + ".bn")
     }
-    private func ln(_ x: MLXArray, _ p: String, eps: Float = 1e-5) -> MLXArray {
+    func ln(_ x: MLXArray, _ p: String, eps: Float = 1e-5) -> MLXArray {
         let u = x.mean(axis: -1, keepDims: true); let d = x - u
         return d / MLX.sqrt((d * d).mean(axis: -1, keepDims: true) + eps) * a(p + ".weight") + a(p + ".bias")
     }
-    private func gelu(_ x: MLXArray) -> MLXArray { 0.5 * x * (1 + MLX.erf(x / 1.4142135623730951)) }
-    private func relu(_ x: MLXArray) -> MLXArray { MLX.maximum(x, 0) }
-    private func lin(_ x: MLXArray, _ p: String) -> MLXArray { MLX.matmul(x, a(p + ".weight").transposed()) + a(p + ".bias") }
+    func gelu(_ x: MLXArray) -> MLXArray { 0.5 * x * (1 + MLX.erf(x / 1.4142135623730951)) }
+    func relu(_ x: MLXArray) -> MLXArray { MLX.maximum(x, 0) }
+    func lin(_ x: MLXArray, _ p: String) -> MLXArray { MLX.matmul(x, a(p + ".weight").transposed()) + a(p + ".bias") }
+    func linNB(_ x: MLXArray, _ p: String) -> MLXArray { MLX.matmul(x, a(p + ".weight").transposed()) }  // bias-free
 
     // MARK: RepViT encoder
     private func se(_ x: MLXArray, _ p: String) -> MLXArray {
@@ -98,7 +100,7 @@ public final class EdgeTAMModel: @unchecked Sendable {
         c = 2 * Float.pi * c
         return MLX.concatenated([MLX.sin(c), MLX.cos(c)], axis: -1)
     }
-    private func densePE(_ h: Int = 64, _ wd: Int = 64) -> MLXArray {  // (1,h,w,256)
+    func densePE(_ h: Int = 64, _ wd: Int = 64) -> MLXArray {          // (1,h,w,256)
         var coords = [Float](repeating: 0, count: h * wd * 2)
         for y in 0 ..< h { for x in 0 ..< wd {
             coords[(y * wd + x) * 2 + 0] = (Float(x) + 0.5) / Float(wd)
@@ -108,7 +110,7 @@ public final class EdgeTAMModel: @unchecked Sendable {
     }
 
     // MARK: prompt encoder
-    private func embedPrompt(_ coordsPx: MLXArray, _ labels: [Int]) -> (sparse: MLXArray, dense: MLXArray) {
+    func embedPrompt(_ coordsPx: MLXArray, _ labels: [Int]) -> (sparse: MLXArray, dense: MLXArray) {
         let pts = MLX.concatenated([coordsPx + 0.5, MLXArray([0.0, 0.0] as [Float], [1, 2])], axis: 0)
         let labelsF = labels + [-1]
         let pe = peEncoding(pts / 1024.0)                             // (N+1,256)
@@ -143,7 +145,7 @@ public final class EdgeTAMModel: @unchecked Sendable {
         k = ln(k + attn(k + kpe, q + qpe, q, p + ".cross_attn_image_to_token"), p + ".norm4")
         return (q, k)
     }
-    private func transformer(_ imageEmbed: MLXArray, _ imagePe: MLXArray, _ tokens: MLXArray) -> (MLXArray, MLXArray) {
+    func transformer(_ imageEmbed: MLXArray, _ imagePe: MLXArray, _ tokens: MLXArray) -> (MLXArray, MLXArray) {
         var keys = imageEmbed.reshaped([1, 64 * 64, 256])
         let kpe = imagePe.reshaped([1, 64 * 64, 256])
         var q = tokens
@@ -154,12 +156,12 @@ public final class EdgeTAMModel: @unchecked Sendable {
     }
 
     // MARK: mask decoder
-    private func mlpHead(_ x0: MLXArray, _ p: String, _ n: Int) -> MLXArray {
+    func mlpHead(_ x0: MLXArray, _ p: String, _ n: Int) -> MLXArray {
         var x = x0
         for i in 0 ..< n { x = lin(x, "\(p).layers.\(i)"); if i < n - 1 { x = relu(x) } }
         return x
     }
-    private func convT(_ x: MLXArray, _ k: String, _ b: String) -> MLXArray {
+    func convT(_ x: MLXArray, _ k: String, _ b: String) -> MLXArray {
         MLX.convTransposed2d(x, a(k), stride: 2, padding: 0) + a(b)
     }
 

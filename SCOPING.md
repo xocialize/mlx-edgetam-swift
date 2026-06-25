@@ -102,8 +102,50 @@ coord conventions — the classic SAM parity traps to pin). Video stack (perceiv
   (align_corners=False) postprocess + threshold, multimask best-by-IoU. `edgetam-smoke --image`:
   **postproc bilinear 8.7e-5** (exact vs torch), **e2e IoU-vs-PyTorch 0.9902** on truck click → correct
   cab-window mask. **→ PHASE 1 (image-mode promptable segmentation) COMPLETE in Swift.**
-- **P2 — video memory stack** (perceiver + RoPE-2D memory attention + memory-bank state machine).
-- **P3 — ModelPackage** (promptable surface) + publish (mlx-community 54MB / xocialize).
+- **P3 — image-mode ModelPackage + publish: DONE 2026-06-25** (promptSegment 1.10.0, MLXEdgeTAM, mlx-community/EdgeTAM-fp16, xocialize v0.1.0). See CONFORMANCE.md.
+
+## P2 — video memory stack (in progress)
+
+**Config (edgetam.yaml):** num_maskmem=7 (1 cond + 6 prev), use_obj_ptrs_in_encoder, max_obj_ptrs 16,
+only_obj_ptrs_in_the_past, directly_add_no_mem_embed, sigmoid_scale 20 / bias −10 for mem-enc, mem_dim 64.
+
+**Per-frame flow (after frame 0):** encode frame (RepViT+FPN, image-mode) → **memory-attend** current feats
+(queries) to the memory bank (keys = past frames' compressed memory + obj-ptrs) via MemoryAttention (2 layers,
+RoPE-2D, num_heads 1) → mask decoder → **encode new memory**: MaskDownSampler(k3 s2) + Fuser(2× CXBlock dw-k7)
+→ **PerceiverResampler compresses** to 512 latents → store with temporal pos-enc; mask-token → obj-ptr.
+
+**Components / de-risk status:**
+- **PerceiverResampler — DE-RISKED 2026-06-25 (`oracle/mlx_perceiver.py`, 2.2e-5 vs golden).** 256 1D
+  global latents (cross-attend all 4096 positions + pos added to k&v) + 256 2D windowed latents (16×16
+  windows of the 64×64, 1 latent/window, shared layers) → concat 512. heads 1, dim 64, FF=LN+Lin+GELU+Lin.
+- **MemoryEncoder — DE-RISKED 2026-06-25 (`oracle/mlx_mem_encoder.py`, 2.9e-6).** MaskDownSampler (4×
+  conv-s2 + LN2d + GELU → 1×1) + pix_feat_proj + Fuser (2× CXBlock dw-k7) + out_proj→64. (caller does
+  the scaled-sigmoid; encoder gets skip_mask_sigmoid=True.)
+- **MemoryAttention (RoPE-2D) — DE-RISKED 2026-06-25 (`oracle/mlx_mem_attn.py`, 3.5e-6, first try).**
+  2 layers (self-attn rope-q&k 64² + cross-v2: q rope 64², keys [256 1D no-rope, 256 2D rope-16², 4
+  obj-ptr no-rope] = memory+pos, MLP relu). `output = curr + 0.1·curr_pos`. internal 256, heads 1.
+  **→ ALL THREE NOVEL VIDEO OPS DE-RISKED** (perceiver 2.2e-5 · encoder 2.9e-6 · attention 3.5e-6).
+- **Memory-bank orchestration — SPEC'D 2026-06-25 (`VIDEO-ORCHESTRATION.md`, via background explorer agent):**
+  memory-slot temporal indexing `maskmem_tpos_enc[6−t_pos]`, obj-ptr split into 4 tokens (mem_dim 64<C 256),
+  spatial-then-pointer concat, scaled-sigmoid memory, directly_add_no_mem_embed first frame, obj_ptr from
+  multimask tokens + fixed_no_obj_ptr gating. The hard stateful algorithm — mapped, ready to port.
+- **Swift port — DONE 2026-06-25 (`Sources/EdgeTAM/EdgeTAMVideo.swift` + `EdgeTAMVideoPredictor.swift`).**
+  All 3 ops + RoPE-2D + memory-bank state machine + tracking-decode + propagate loop transcribed from the
+  validated oracles; `convert.py` extended to 874 tensors (147 video; 9 real convs → NHWC, `maskmem_tpos_enc`
+  raw). Position encodings (PositionEmbeddingSine) generated in Swift, validated vs goldens to ~5e-7.
+  `edgetam-video-smoke` (CPU fp32): every op = Python-oracle precision; **full 5-frame masklet min-IoU 0.92**
+  (frame-0 IoU 1.0; f1–4 diverge a few boundary px vs the bf16-offload reference — Swift keeps fp32). The
+  click must be normalized `(point/[W,H])·1024` before the prompt encoder. **→ P2 video tracking validated
+  in Swift.**
+- **P3-video — ENGINE INTEGRATION DONE 2026-06-25.** New `trackObject` capability in MLXToolKit **contract
+  1.11.0** (engine `415c4af`): `TrackObjectRequest` (Video + point/box on `promptFrame`) → `TrackObjectResponse`
+  (`[Matte]` per frame + per-frame scores); `CanonicalOutput.matteSequence` (lossless per-frame, not a
+  re-encoded mask video). `EdgeTAMPackage` gains the second surface (`edgetam-track`); `Video` bytes are
+  decoded via `FrameStreamNative.decode` (new frames-in seam, `27e767f`) → `EdgeTAMVideoPredictor.track` →
+  `[Matte]`. `edgetam-video-package-smoke` (full surface, GPU): ProRes .mov → decode → masklet → 5 mattes,
+  per-frame IoU 0.92–0.98, **measured peak 1.07 GB @ 5f / 1.79 GB @ 30f** (~0.9 GB fixed + ~30 MB/frame).
+  Weights republished mlx-community/EdgeTAM-fp16 (874 tensors, fp16 round-trip validated for video).
+  Remaining: multi-object (additive); long-clip streaming (don't pre-stack frames) for >35-frame clips.
 
 ## First read: feasible, well-phased, image-mode is the affordable win
 54 MB, Apache, CoreML-proven on Apple HW, and the hard part (video memory) is cleanly separable from a

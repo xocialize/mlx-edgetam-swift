@@ -7,3 +7,4 @@ oracle/*.png
 *.safetensors
 .DS_Store
 oracle/publish_edgetam/
+oracle/__pycache__/
