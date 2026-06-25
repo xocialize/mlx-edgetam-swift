@@ -16,7 +16,7 @@ let package = Package(
     products: [
         .library(name: "EdgeTAM", targets: ["EdgeTAM"]),                // MLX core (mlx-swift only)
         .library(name: "MLXEdgeTAM", targets: ["MLXEdgeTAM"]),          // engine-consumable ModelPackage
-        .executable(name: "edgetam-smoke", targets: ["Smoke"]),
+        .executable(name: "edgetam-smoke", targets: ["EdgeTAMSmoke"]),
         .executable(name: "edgetam-video-smoke", targets: ["VideoSmoke"]),
         .executable(name: "edgetam-package-smoke", targets: ["PackageSmoke"]),
         .executable(name: "edgetam-video-package-smoke", targets: ["VideoPackageSmoke"]),
@@ -25,8 +25,8 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
-        // MLXToolKit contract (promptSegment 1.10.0 + trackObject 1.11.0). Pinned to the trackObject revision.
-        .package(url: "https://github.com/xocialize/mlx-engine-swift.git", revision: "415c4af"),
+        // MLXToolKit contract (promptSegment 1.10.0 + trackObject 1.11.0). Released as engine 0.11.0.
+        .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.11.0"),
         // FFmpeg-free native video decode (Video bytes → frames) for the trackObject runtime surface.
         .package(url: "https://github.com/xocialize/frame-stream-native.git", revision: "27e767f"),
     ],
@@ -44,9 +44,9 @@ let package = Package(
             ],
             path: "Sources/MLXEdgeTAM"),
         .executableTarget(
-            name: "Smoke",
+            name: "EdgeTAMSmoke",
             dependencies: ["EdgeTAM", .product(name: "ArgumentParser", package: "swift-argument-parser")],
-            path: "Sources/Smoke", swiftSettings: [.swiftLanguageMode(.v5)]),
+            path: "Sources/EdgeTAMSmoke", swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(
             name: "VideoSmoke",
             dependencies: ["EdgeTAM", .product(name: "ArgumentParser", package: "swift-argument-parser")],
