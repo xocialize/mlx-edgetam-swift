@@ -1,0 +1,21 @@
+mlx-edgetam-swift
+=================
+
+From-scratch MLX-Swift architecture port (no pre-existing MLX implementation) of EdgeTAM,
+the on-device SAM 2 variant for promptable segmentation:
+
+  EdgeTAM — Copyright (c) Meta Platforms, Inc. and affiliates — Apache License 2.0
+  https://github.com/facebookresearch/EdgeTAM
+  "EdgeTAM: On-Device Track Anything Model" (arXiv 2501.07256)
+  Built on the SAM 2 codebase (Apache-2.0). Image encoder = RepViT-M1 (timm, Apache-2.0).
+
+The Swift/MLX port (`Sources/EdgeTAM`, `Sources/MLXEdgeTAM`) is original to this repository and
+licensed MIT (see LICENSE). The EdgeTAM/SAM 2 architecture and original weights remain Apache-2.0.
+
+This repository ports **image-mode** promptable segmentation (point/box → mask). The video
+masklet-tracking stack (2D-spatial perceiver + memory attention + memory bank) is a future addition.
+
+Converted MLX weights (fp16): https://huggingface.co/mlx-community/EdgeTAM-fp16
+
+Two-layer license declaration for MLXEngine admission (C7/C8):
+  weight license = Apache-2.0   ·   port-code license = MIT   (both permissive).

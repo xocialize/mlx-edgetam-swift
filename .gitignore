@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+oracle/.venv
+oracle/weights/
+oracle/goldens/
+oracle/*.png
+*.safetensors
+.DS_Store
+oracle/publish_edgetam/
