@@ -1,5 +1,5 @@
 {
-  "originHash" : "fa12c94410f1680f02b5e25dd50f709b4e100ae99a77887b05b0a4f7481b8498",
+  "originHash" : "e7c004e4b20da9261ffca7f1f590a15ee6758f38badfcb042c878d405d99b938",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/frame-stream-native.git",
       "state" : {
-        "branch" : "27e767f",
-        "revision" : "27e767f5dab7164a4bdd9c20299d239b1582784a"
+        "revision" : "27e767f5dab7164a4bdd9c20299d239b1582784a",
+        "version" : "0.2.0"
       }
     },
     {

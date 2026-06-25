@@ -28,7 +28,9 @@ let package = Package(
         // MLXToolKit contract (promptSegment 1.10.0 + trackObject 1.11.0). Released as engine 0.11.0.
         .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.11.0"),
         // FFmpeg-free native video decode (Video bytes → frames) for the trackObject runtime surface.
-        .package(url: "https://github.com/xocialize/frame-stream-native.git", revision: "27e767f"),
+        // Stable version pin (v0.2.0 = the decode(input:) frames-in seam at 27e767f) so EdgeTAM's whole
+        // graph is version-based and consumable by tag — a revision sub-dep breaks version consumers (SwiftPM).
+        .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.2.0"),
     ],
     targets: [
         .target(name: "EdgeTAM", dependencies: mlxCore, path: "Sources/EdgeTAM",
