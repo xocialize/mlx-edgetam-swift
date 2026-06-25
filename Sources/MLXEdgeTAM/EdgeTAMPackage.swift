@@ -82,8 +82,20 @@ public final class EdgeTAMPackage: ModelPackage {
 
     // MARK: trackObject (video masklet)
 
+    // ENHANCEMENT(v2) — scheduled near-future pass on trackObject. Three known limitations, all additive
+    // (no contract bump needed; the request is already lane-ready):
+    //   1. MULTI-OBJECT (priority). V1 tracks ONE object (one prompt set → one Matte track). SAM2 supports
+    //      N obj_ids; extend `EdgeTAMModel.propagate` to a batched object dimension (shared per-frame
+    //      encode, per-object memory bank + decode) and return `[[Matte]]` / interleaved tracks. The
+    //      contract carries this without change (add an obj-grouping field or one request per object).
+    //   2. BOX PROMPT. `req.box` is accepted by the contract but ignored here (V1 = point prompts);
+    //      wire it through `embedPrompt` like the image surface's follow-up.
+    //   3. LONG-CLIP STREAMING. `propagate` pre-stacks all frames and retains every output matte in GPU
+    //      memory (~30 MB/frame → 2 GB footprint caps ~35-frame clips). Stream instead: decode+process
+    //      frame-by-frame, encode each Matte as it lands, `mx.clear_cache()` per step. Flattens the
+    //      footprint to ~fixed and lifts the clip-length ceiling.
     private func runTrack(_ req: TrackObjectRequest) async throws -> TrackObjectResponse {
-        guard !req.points.isEmpty else { throw EdgeTAMError.noPrompt }  // V1: point prompts (box = follow-up)
+        guard !req.points.isEmpty else { throw EdgeTAMError.noPrompt }  // V1: point prompts (box = ENHANCEMENT v2 #2)
         // Decode the Video bytes to frames (FrameStreamNative, native containers only).
         let frames = try await Self.decodeVideo(req.video)
         guard req.promptFrame >= 0, req.promptFrame < frames.count else {

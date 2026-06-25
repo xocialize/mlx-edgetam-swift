@@ -293,6 +293,10 @@ extension EdgeTAMModel {
     }
 
     // MARK: - Propagate (single object, click on `clickFrame`)
+    // ENHANCEMENT(v2): SINGLE OBJECT + PRE-STACKED frames. Multi-object → add a batched object axis (one
+    // memory bank per object, shared per-frame encode). Long clips → process frame-by-frame instead of
+    // taking the whole `(T,…)` stack + accumulating all masks (stream out + `clear_cache` per step). See
+    // the EnhancementBlock at `EdgeTAMPackage.runTrack`.
     /// `frames` NHWC `(T,1024,1024,3)` (ImageNet-normalized). `points` are `[x,y]` in original-video px
     /// (foreground/background per `labels`: 1/0), prompting on `clickFrame`. Returns per-frame mask logits
     /// `(origH,origW)`.
