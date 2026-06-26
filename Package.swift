@@ -17,9 +17,9 @@ let package = Package(
         .library(name: "EdgeTAM", targets: ["EdgeTAM"]),                // MLX core (mlx-swift only)
         .library(name: "MLXEdgeTAM", targets: ["MLXEdgeTAM"]),          // engine-consumable ModelPackage
         .executable(name: "edgetam-smoke", targets: ["EdgeTAMSmoke"]),
-        .executable(name: "edgetam-video-smoke", targets: ["VideoSmoke"]),
-        .executable(name: "edgetam-package-smoke", targets: ["PackageSmoke"]),
-        .executable(name: "edgetam-video-package-smoke", targets: ["VideoPackageSmoke"]),
+        .executable(name: "edgetam-video-smoke", targets: ["EdgeTAMVideoSmoke"]),
+        .executable(name: "edgetam-package-smoke", targets: ["EdgeTAMPackageSmoke"]),
+        .executable(name: "edgetam-video-package-smoke", targets: ["EdgeTAMVideoPackageSmoke"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
@@ -50,21 +50,21 @@ let package = Package(
             dependencies: ["EdgeTAM", .product(name: "ArgumentParser", package: "swift-argument-parser")],
             path: "Sources/EdgeTAMSmoke", swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(
-            name: "VideoSmoke",
+            name: "EdgeTAMVideoSmoke",
             dependencies: ["EdgeTAM", .product(name: "ArgumentParser", package: "swift-argument-parser")],
-            path: "Sources/VideoSmoke", swiftSettings: [.swiftLanguageMode(.v5)]),
+            path: "Sources/EdgeTAMVideoSmoke", swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(
-            name: "PackageSmoke",
+            name: "EdgeTAMPackageSmoke",
             dependencies: ["MLXEdgeTAM",
                            .product(name: "MLXToolKit", package: "mlx-engine-swift"),
                            .product(name: "ArgumentParser", package: "swift-argument-parser")],
-            path: "Sources/PackageSmoke"),
+            path: "Sources/EdgeTAMPackageSmoke"),
         .executableTarget(
-            name: "VideoPackageSmoke",
+            name: "EdgeTAMVideoPackageSmoke",
             dependencies: ["MLXEdgeTAM", "EdgeTAM",
                            .product(name: "MLX", package: "mlx-swift"),
                            .product(name: "MLXToolKit", package: "mlx-engine-swift"),
                            .product(name: "ArgumentParser", package: "swift-argument-parser")],
-            path: "Sources/VideoPackageSmoke"),
+            path: "Sources/EdgeTAMVideoPackageSmoke"),
     ]
 )
