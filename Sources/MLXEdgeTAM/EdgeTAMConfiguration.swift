@@ -3,7 +3,7 @@ import MLXToolKit
 
 /// Configuration for the EdgeTAM `promptSegment` package. Single 54 MB checkpoint (image-mode promptable
 /// segmentation); weights resolve under the engine model store (`modelsRootDirectory` + repo + file).
-public struct EdgeTAMConfiguration: PackageConfiguration, ModelStorable {
+public struct EdgeTAMConfiguration: PackageConfiguration, ModelStorable, QuantConfigured {
     public var repo: String
     public var weightsFile: String
     public var quant: Quant

@@ -23,18 +23,27 @@ public final class EdgeTAMPackage: ModelPackage {
             license: LicenseDeclaration(weightLicense: .apache2, portCodeLicense: .mit),  // EdgeTAM Apache / port MIT
             provenance: Provenance(sourceRepo: "mlx-community/EdgeTAM-fp16", revision: "main", tier: 2),
             requirements: RequirementsManifest(
-                // Image-mode measured (M-Max, 1800×1200 source, fp32): peak 0.42 GB — EdgeTAM is
-                // on-device-tiny (54 MB, RepViT encoder @ fixed 1024²). trackObject runs the same per-frame
-                // forward sequentially and now STREAMS it (ENHANCEMENT v2 #3): frames are pulled one at a
-                // time, each Matte is emitted+dropped as it lands, and mx.clear_cache() runs per frame — so
-                // the GPU working set is FLAT in clip length. MEASURED on GPU (960×540 source, fp32, the
-                // streaming propagate core): 5f = 1.00 GB, 30f = 1.02 GB, 60f = 1.03 GB, 120f = 1.04 GB →
-                // ~1.0 GB fixed + ~0.37 MB/frame (the only thing that grows is the tiny per-frame memory
-                // bank: spatial 512×64 + objPtr; the old stacked path was ~30 MB/frame). The 1.5 GB envelope
-                // now covers very long clips (~1000+ frames) with headroom for HD sources; multi-object adds
-                // a memory bank + decode per object but shares the per-frame encode, so each object tracked
-                // in one pass adds only its own ~0.37 MB/frame.
-                footprints: [QuantFootprint(quant: .fp16, residentBytes: 1_500_000_000)],
+                // SPLIT footprint (engine 1.14 / QuantConfigured). EdgeTAM is on-device-tiny (54 MB on
+                // disk, RepViT encoder @ fixed 1024²). The per-frame encode+decode is the core op and runs
+                // sequentially; trackObject STREAMS it (ENHANCEMENT v2 #3): frames are pulled one at a time,
+                // each Matte is emitted+dropped as it lands, mx.clear_cache() runs per frame (EdgeTAMVideo
+                // .swift:411) → the GPU working set stays FLAT in clip length (encoder is NOT evictable
+                // mid-track, so no per-stage lever; the per-frame clearCache already bounds the transient).
+                //   MEASURED on GPU (960×540 source, fp32, streaming propagate core): 5f = 1.00 GB,
+                //   30f = 1.02 GB, 60f = 1.03 GB, 120f = 1.04 GB → ~1.0 GB fixed + ~0.37 MB/frame (the only
+                //   growth is the tiny per-frame memory bank: spatial 512×64 + objPtr). Image-mode peak
+                //   (1800×1200, fp32) = 0.42 GB (one forward, weights + a single-frame transient).
+                // residentBytes = the encoder+decoder weights floor that stays resident through the
+                // per-frame loop (~1.0 GB working set base; on-disk weights are 54 MB but the RepViT/FPN
+                // resident buffers + memory bank dominate). peakActivationBytes = one frame's encode+decode
+                // transient (the working set the per-frame clearCache bounds; ~0.5 GB covers the single
+                // forward over the prior 0.42 GB image peak with headroom). Σ stays within the prior 1.5 GB
+                // envelope, so long clips (1000+ frames) + HD sources still fit.
+                // NOTE: activation = smoke/derived est (single-frame), in-app phys re-baseline PENDING
+                // (promptSegment measurable in MLXEngineImage; trackObject via the video app) — process
+                // phys_footprint (R-MEM-1/admission) reads ~2.5–2.9× a smoke MLX-peak.
+                footprints: [QuantFootprint(quant: .fp16, residentBytes: 1_000_000_000,
+                                            peakActivationBytes: 500_000_000)],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0))
             ),
@@ -57,7 +66,12 @@ public final class EdgeTAMPackage: ModelPackage {
     public nonisolated init(configuration: Configuration) { self.configuration = configuration }
 
     public func load() async throws { if predictor == nil { predictor = try await build() } }
-    public func unload() async { predictor = nil; videoPredictor = nil }
+    public func unload() async {
+        predictor = nil; videoPredictor = nil
+        // Dropping the refs alone leaves the weight/activation buffers in MLX's pool, so
+        // phys_footprint doesn't fall and engine.evict / R-MEM-1 can't reclaim. Flush the pool.
+        MLX.Memory.clearCache()
+    }
 
     public func run(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
         try Task.checkCancellation()
