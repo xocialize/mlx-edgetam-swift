@@ -31,6 +31,8 @@ let package = Package(
         // Stable version pin (v0.2.0 = the decode(input:) frames-in seam at 27e767f) so EdgeTAM's whole
         // graph is version-based and consumable by tag — a revision sub-dep breaks version consumers (SwiftPM).
         .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.2.0"),
+        // Shared env-gated perf instrument (MLX_PROFILE=1); zero overhead when unset, mlx-swift-only dep.
+        .package(url: "https://github.com/xocialize/mlx-profiling.git", from: "0.1.0"),
     ],
     targets: [
         .target(name: "EdgeTAM", dependencies: mlxCore, path: "Sources/EdgeTAM",
@@ -43,6 +45,7 @@ let package = Package(
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
                 .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "FrameStreamNative", package: "frame-stream-native"),
+                .product(name: "MLXProfiling", package: "mlx-profiling"),
             ],
             path: "Sources/MLXEdgeTAM"),
         .executableTarget(

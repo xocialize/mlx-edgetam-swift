@@ -7,6 +7,7 @@ import MLXToolKit
 import Hub
 import EdgeTAM
 import FrameStreamNative
+import MLXProfiling
 
 /// The conformant EdgeTAM ModelPackage. Two surfaces over one 54 MB checkpoint (the engine constructs /
 /// loads / evicts it, C13):
@@ -88,9 +89,18 @@ public final class EdgeTAMPackage: ModelPackage {
         guard !req.points.isEmpty else { throw EdgeTAMError.noPrompt }  // V1: point prompts (box = follow-up)
         if predictor == nil { predictor = try await build() }
         let cg = try Self.decode(req.image)
-        predictor!.setImage(cg)
         let labels = req.pointLabels.count == req.points.count ? req.pointLabels : Array(repeating: 1, count: req.points.count)
-        let r = predictor!.predict(points: req.points, labels: labels)
+        // Single-shot inference is profiled (MLX_PROFILE=1). `setImage` only builds the lazy preprocess
+        // graph — nothing realizes until `predict` evals (IoU asArray + best-mask eval), so encode and
+        // decode land in ONE forward and get one honest coarse region. beginRun sits AFTER the lazy
+        // build so a first-request weight download can't skew the run.
+        let prof = MLXProfiler.shared
+        prof.beginRun("edgetam promptSegment points=\(req.points.count) \(cg.width)x\(cg.height)")
+        let r = prof.region("segment", "forward") { () -> (mask: MLXArray, score: Float, fullLogits: MLXArray, scores: [Float]) in
+            predictor!.setImage(cg)
+            return predictor!.predict(points: req.points, labels: labels)
+        }
+        prof.endRun(denominators: ["image": 1])
         try Task.checkCancellation()
         let png = try Self.encodePNG(EdgeTAMImage.maskCGImage(r.mask))
         return PromptSegmentResponse(
@@ -115,25 +125,40 @@ public final class EdgeTAMPackage: ModelPackage {
     private func runTrack(_ req: TrackObjectRequest) async throws -> TrackObjectResponse {
         // One object per request (the lane-ready, no-bump multi-object surface): point and/or box prompt.
         guard !req.points.isEmpty || req.box != nil else { throw EdgeTAMError.noPrompt }
-        // Decode the Video bytes to frames (FrameStreamNative, native containers only).
+        // Decode the Video bytes to frames (FrameStreamNative, native containers only). The decode is
+        // codec time, not MLX time — it gets its own coarse "io" span, deliberately OUTSIDE the profiled
+        // run (it live-logs under MLX_PROFILE=1 but stays out of the MLX summary/ms-per-frame rollup).
+        let prof = MLXProfiler.shared
+        let ioSpan = prof.begin("io", "decode", note: "FrameStreamNative")
         let frames = try await Self.decodeVideo(req.video)
+        prof.end(ioSpan)
         guard req.promptFrame >= 0, req.promptFrame < frames.count else {
             throw EdgeTAMError.promptFrameOutOfRange(req.promptFrame, frames.count)
         }
         if videoPredictor == nil { videoPredictor = try await buildVideo() }
+        // beginRun sits AFTER the lazy build so a first-request weight load can't skew the run.
+        prof.beginRun("edgetam trackObject frames=\(frames.count)")
         let labels = req.pointLabels.count == req.points.count ? req.pointLabels : Array(repeating: 1, count: req.points.count)
         // Stream: each frame's Matte is PNG-encoded and the MLX mask dropped the instant it lands, so the
         // GPU working set stays flat across long clips (the predictor clears its per-step cache). The only
         // thing that grows is the output PNG list, which the contract returns in full regardless.
         var masks: [Matte] = []; masks.reserveCapacity(frames.count)
         var scores: [Float] = []; scores.reserveCapacity(frames.count)
+        // Manual spans bracket each propagate step: the core evals the frame's mask + memory-bank entry
+        // right before `emit` fires (EdgeTAMVideo.propagate), so end-at-emit captures the frame's real
+        // compute; the PNG encode below falls BETWEEN spans, outside MLX time. The span begun after the
+        // last frame is never ended, so it records nothing.
+        var frameSpan = prof.begin("track", "frame", index: 0)
         try videoPredictor!.track(frames: frames, clickFrame: req.promptFrame,
-                                  points: req.points, labels: labels, box: req.box) { _, fm in
+                                  points: req.points, labels: labels, box: req.box) { i, fm in
+            prof.end(frameSpan)
             try Task.checkCancellation()
             let png = try Self.encodePNG(EdgeTAMImage.maskCGImage(fm.mask))
             masks.append(Matte(format: .png, data: png, width: fm.mask.dim(1), height: fm.mask.dim(0), kind: .binary))
             scores.append(fm.score)
+            frameSpan = prof.begin("track", "frame", index: i + 1)
         }
+        prof.endRun(denominators: ["frame": Double(frames.count)])
         return TrackObjectResponse(masks: masks, scores: scores)
     }
 
