@@ -75,6 +75,10 @@ public final class EdgeTAMPackage: ModelPackage {
     }
 
     public func run(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
+        // CAN-1: the entry checkpoint is the FIRST act of run() — before dispatch/validation
+        // (engine ≥ 0.27.0). Mid-run cadence: trackObject checkpoints once per propagated frame
+        // (the emit closure in runTrack); promptSegment is a single forward with a post-forward
+        // checkpoint. See CancellationTests for the cadence of record.
         try Task.checkCancellation()
         switch request {
         case let req as PromptSegmentRequest: return try await runSegment(req)

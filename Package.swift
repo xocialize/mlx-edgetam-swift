@@ -25,8 +25,9 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
-        // MLXToolKit contract (promptSegment 1.10.0 + trackObject 1.11.0). Released as engine 0.11.0.
-        .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.11.0"),
+        // MLXToolKit contract (promptSegment 1.10.0 + trackObject 1.11.0); 0.27.0 = the CAN
+        // cancellation gate (MLXServeConformance CAN-1..3).
+        .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.27.0"),
         // FFmpeg-free native video decode (Video bytes → frames) for the trackObject runtime surface.
         // Stable version pin (v0.2.0 = the decode(input:) frames-in seam at 27e767f) so EdgeTAM's whole
         // graph is version-based and consumable by tag — a revision sub-dep breaks version consumers (SwiftPM).
@@ -69,5 +70,13 @@ let package = Package(
                            .product(name: "MLXToolKit", package: "mlx-engine-swift"),
                            .product(name: "ArgumentParser", package: "swift-argument-parser")],
             path: "Sources/EdgeTAMVideoPackageSmoke"),
+        .testTarget(
+            name: "MLXEdgeTAMTests",
+            dependencies: [
+                "MLXEdgeTAM",
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                .product(name: "MLXServeConformance", package: "mlx-engine-swift"),  // CAN gate
+            ],
+            path: "Tests/MLXEdgeTAMTests"),
     ]
 )
