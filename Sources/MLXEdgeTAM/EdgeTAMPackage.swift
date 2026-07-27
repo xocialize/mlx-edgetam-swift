@@ -125,7 +125,7 @@ public final class EdgeTAMPackage: ModelPackage {
     //      surface end-to-end if a caller needs it; intentionally deferred to honor "prefer no contract bump".
     //   2. BOX PROMPT — DONE. `req.box` is wired through `forwardSamHeads`→`embedPrompt` (SAM corner tokens).
     //   3. LONG-CLIP STREAMING — DONE. `propagate` pulls frames one at a time and emits each Matte as it
-    //      lands (PNG-encoded here, MLX mask dropped), `MLX.GPU.clearCache()` per frame → flat GPU footprint.
+    //      lands (PNG-encoded here, MLX mask dropped), `MLX.Memory.clearCache()` per frame → flat GPU footprint.
     private func runTrack(_ req: TrackObjectRequest) async throws -> TrackObjectResponse {
         // One object per request (the lane-ready, no-bump multi-object surface): point and/or box prompt.
         guard !req.points.isEmpty || req.box != nil else { throw EdgeTAMError.noPrompt }

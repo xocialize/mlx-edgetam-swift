@@ -13,7 +13,7 @@ struct VideoSmoke: ParsableCommand {
 
     @Option(name: .long) var weights: String
     @Option(name: .long, help: "parity_video.safetensors") var parity: String
-    @Option(name: .long, help: "GPU flat-footprint measurement: cycle the 5 embedded frames to N, stream through propagate, report MLX.GPU.peakMemory (0 = CPU parity gate).")
+    @Option(name: .long, help: "GPU flat-footprint measurement: cycle the 5 embedded frames to N, stream through propagate, report MLX.Memory.peakMemory (0 = CPU parity gate).")
     var measureFrames: Int = 0
 
     func run() throws {
@@ -183,7 +183,7 @@ struct VideoSmoke: ParsableCommand {
         let secs = Date().timeIntervalSince(start)
         let ok = minIoU > 0.90
         print(String(format: "[vid-measure] %d frames (fp32, GPU, streaming)  peak=%.3f GB  min_IoU(f0..4)=%.4f  (%.1fs)  %@",
-                     n, Double(MLX.GPU.peakMemory) / 1e9, minIoU, secs, ok ? "OK ✅" : "FAIL ❌"))
+                     n, Double(MLX.Memory.peakMemory) / 1e9, minIoU, secs, ok ? "OK ✅" : "FAIL ❌"))
         if !ok { throw ExitCode(1) }
     }
 }

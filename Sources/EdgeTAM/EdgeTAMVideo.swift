@@ -330,7 +330,7 @@ extension EdgeTAMModel {
     /// Propagation is forward-only: an object's track is empty (`-1024` score, zero mask) on frames before
     /// its `clickFrame`. Flat-footprint discipline (cf. the scail-2 long-run cache lesson): each step
     /// `eval()`s every object's output mask **and** new memory-bank entry, hands the masks out via `emit`,
-    /// then a single `MLX.GPU.clearCache()` per frame drops the transient working set. Peak ≈ one frame's
+    /// then a single `MLX.Memory.clearCache()` per frame drops the transient working set. Peak ≈ one frame's
     /// shared encode + O object forwards + the tiny per-object memory banks.
     public func propagate(frameCount T: Int, objects: [ObjectPrompt], origH: Int, origW: Int,
                           frame: (Int) -> MLXArray,
@@ -408,7 +408,7 @@ extension EdgeTAMModel {
                 MLX.eval(full, fm.spatial, fm.spatialPos, fm.objPtr)
                 try emit(o, t, full, objScore)
             }
-            MLX.GPU.clearCache()                                        // drop the frame's transient working set
+            MLX.Memory.clearCache()                                        // drop the frame's transient working set
         }
     }
 

@@ -43,6 +43,6 @@ struct PackageSmoke: AsyncParsableCommand {
         try r.matte.data.write(to: URL(fileURLWithPath: out))
         print(String(format: "[pkg] run → matte %dx%d kind=%@ score=%.3f  (%.2fs, peak %.2f GB) → %@",
                      r.matte.width ?? 0, r.matte.height ?? 0, r.matte.kind.rawValue, r.score,
-                     secs, Double(MLX.GPU.peakMemory) / 1e9, out))
+                     secs, Double(MLX.Memory.peakMemory) / 1e9, out))
     }
 }

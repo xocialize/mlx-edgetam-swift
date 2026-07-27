@@ -84,7 +84,7 @@ struct VideoPackageSmoke: AsyncParsableCommand {
 
         let ok = boyIoU > 0.80 && girlIoU > 0.80 && boxIoU > 0.80
         print(String(format: "[vpkg] trackObject end-to-end  boy=%.3f girl=%.3f box=%.3f thr=0.80  (boy %.2fs, peak %.2f GB)  %@",
-                     boyIoU, girlIoU, boxIoU, secs, Double(MLX.GPU.peakMemory) / 1e9, ok ? "OK ✅" : "FAIL ❌"))
+                     boyIoU, girlIoU, boxIoU, secs, Double(MLX.Memory.peakMemory) / 1e9, ok ? "OK ✅" : "FAIL ❌"))
         if !ok { throw ExitCode(1) }
     }
 
