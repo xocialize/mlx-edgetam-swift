@@ -16,7 +16,11 @@ public final class EdgeTAMVideoPredictor: @unchecked Sendable {
     private let mean = MLXArray([0.485, 0.456, 0.406] as [Float], [1, 1, 1, 3])
     private let std = MLXArray([0.229, 0.224, 0.225] as [Float], [1, 1, 1, 3])
 
-    public init(weights: [String: MLXArray]) { self.model = EdgeTAMModel(weights: weights) }
+    public init(weights: [String: MLXArray]) {
+        self.model = EdgeTAMModel(weights: weights)
+        precondition(model.hiera == nil, "EdgeTAMVideoPredictor: SAM 2.1 (Hiera) weights are image-mode only — "
+                     + "its video memory stack is not ported; use EdgeTAM weights for tracking")
+    }
 
     public static func fromPretrained(_ path: String, dtype: DType = .float32) throws -> EdgeTAMVideoPredictor {
         let w = try MLX.loadArrays(url: URL(fileURLWithPath: path)).mapValues { $0.asType(dtype) }

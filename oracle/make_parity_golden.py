@@ -9,8 +9,12 @@ at single clicks (multimask_output=True, best by IoU) and box prompts (multimask
 recommendation, with the dynamic-stability fallback), and writes scores + the chosen mask (row-major RLE,
 runs alternate starting with background) to Tests/EdgeTAMParityTests/nonsquare_golden.json.
 
-    oracle/.venv/bin/python oracle/make_parity_golden.py
+    oracle/.venv/bin/python oracle/make_parity_golden.py                     # EdgeTAM → nonsquare_golden.json
+    oracle/.venv/bin/python oracle/make_parity_golden.py --config configs/sam2.1/sam2.1_hiera_s.yaml \
+        --ckpt /Volumes/Satechi/Models/sam2.1-oracle/sam2.1_hiera_small.pt --out Tests/EdgeTAMParityTests/sam21s_golden.json
+(SAM 2.1 adds "fox": the Lab's captioned fox, oracle/goldens/click/fox_caption.png, when present.)
 """
+import argparse
 import json
 import os
 import sys
@@ -42,11 +46,18 @@ def rle(mask):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="configs/edgetam.yaml")
+    ap.add_argument("--ckpt", default="checkpoints/edgetam.pt")
+    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--fox", default=os.path.join(HERE, "goldens/click/fox_caption.png"))
+    a = ap.parse_args()
+    out = os.path.abspath(a.out); fox = os.path.abspath(a.fox)
     sys.path.insert(0, REPO); os.chdir(REPO)
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
     torch.set_grad_enabled(False)
-    pred = SAM2ImagePredictor(build_sam2("configs/edgetam.yaml", "checkpoints/edgetam.pt", device="cpu"))
+    pred = SAM2ImagePredictor(build_sam2(a.config, a.ckpt, device="cpu"))
 
     cases = {
         "gate": (gate_page(), [[43, 47], [1155, 64], [607, 403], [77, 763], [1009, 737]],
@@ -54,7 +65,11 @@ def main():
         "truck": (np.array(Image.open("notebooks/images/truck.jpg").convert("RGB")),
                   [[500, 375], [1375, 550]], [[425, 600, 700, 875], [75, 275, 1725, 850]]),
     }
-    golden = {"source": "facebookresearch/EdgeTAM SAM2ImagePredictor, CPU fp32, checkpoints/edgetam.pt", "images": {}}
+    if a.config != "configs/edgetam.yaml" and os.path.exists(fox):
+        cases["fox"] = (np.array(Image.open(fox).convert("RGB")), [[471, 635], [620, 560], [300, 700], [100, 780]],
+                        [[40, 245, 745, 910]])
+    golden = {"source": f"facebookresearch/EdgeTAM SAM2ImagePredictor, CPU fp32, {a.config}, {os.path.basename(a.ckpt)}",
+              "images": {}}
     for name, (img, clicks, boxes) in cases.items():
         pred.set_image(img)
         entries = []
@@ -69,9 +84,9 @@ def main():
         golden["images"][name] = {"width": img.shape[1], "height": img.shape[0], "prompts": entries}
         print(f"[golden] {name} {img.shape[1]}x{img.shape[0]}: "
               + "  ".join(f"{e.get('click', e.get('box'))}→{e['score']:.3f}" for e in entries))
-    with open(OUT, "w") as f:
+    with open(out, "w") as f:
         json.dump(golden, f, separators=(",", ":"))
-    print(f"[golden] → {os.path.normpath(OUT)} ({os.path.getsize(OUT) / 1024:.0f} KB)")
+    print(f"[golden] → {os.path.normpath(out)} ({os.path.getsize(out) / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":

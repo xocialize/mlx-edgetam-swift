@@ -27,15 +27,18 @@ def main():
     ap.add_argument("--clicks", nargs="*", default=[], help="x,y in source px")
     ap.add_argument("--boxes", nargs="*", default=[], help="x0,y0,x1,y1 in source px (box-only prompt)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--config", default="configs/edgetam.yaml", help="e.g. configs/sam2.1/sam2.1_hiera_s.yaml")
+    ap.add_argument("--ckpt", default="checkpoints/edgetam.pt")
+    ap.add_argument("--tag", default="", help="file-name suffix, e.g. .sam21s")
     args = ap.parse_args()
-    image = os.path.abspath(args.image); out = os.path.abspath(args.out)
+    image = os.path.abspath(args.image); out = os.path.abspath(args.out); ckpt = os.path.abspath(args.ckpt) if os.path.isabs(args.ckpt) or os.path.exists(args.ckpt) else args.ckpt
     repo = os.path.abspath(args.repo)
     sys.path.insert(0, repo); os.chdir(repo)            # hydra config resolves from the repo root
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
     torch.set_grad_enabled(False)
-    model = build_sam2("configs/edgetam.yaml", "checkpoints/edgetam.pt", device="cpu")
+    model = build_sam2(args.config, ckpt, device="cpu")
     pred = SAM2ImagePredictor(model)
     img = np.array(Image.open(image).convert("RGB"))
     enc_input = pred._transforms(img)[None]             # exactly what set_image feeds the backbone
@@ -43,7 +46,7 @@ def main():
     f = pred._features
     dump = {"enc_input": enc_input.numpy(), "image_embed": f["image_embed"].numpy(),
             "hrf0": f["high_res_feats"][0].numpy(), "hrf1": f["high_res_feats"][1].numpy()}
-    name = os.path.splitext(os.path.basename(image))[0]
+    name = os.path.splitext(os.path.basename(image))[0] + args.tag
     print(f"[oracle] {name} {img.shape[1]}x{img.shape[0]}")
     for i, c in enumerate(args.clicks):
         x, y = (float(v) for v in c.split(","))

@@ -83,7 +83,10 @@ public final class EdgeTAMPredictor: @unchecked Sendable {
         origH = cg.height; origW = cg.width
         let rgb = EdgeTAMImage.rgb(from: cg, width: origW, height: origH)        // (1,H,W,3) native
         let resized = EdgeTAMImage.resize(rgb, outH: 1024, outW: 1024, antialias: true)
-        let x = (resized - mean) / std                                            // fp32 input (fp16 weights promote)
+        var x = (resized - mean) / std                         // fp32 input: EdgeTAM's fp16 weights promote to fp32
+        // SAM 2.1 (Hiera) computes in the WEIGHT dtype: fp16 activations cut the peak 2.18 → ~1.1 GB at 1024² with
+        // no accuracy cost (fox clicks: mask IoU vs PyTorch fp32 0.9996–0.9999 either way; AB-T-0173).
+        if model.hiera != nil, let d = model.weightDType, d != .float32 { x = x.asType(d) }
         let f = model.features(x)
         f.eval()
         input = x; features = f

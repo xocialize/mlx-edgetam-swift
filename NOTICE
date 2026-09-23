@@ -1,21 +1,25 @@
 mlx-edgetam-swift
 =================
 
-From-scratch MLX-Swift architecture port (no pre-existing MLX implementation) of EdgeTAM,
-the on-device SAM 2 variant for promptable segmentation:
+From-scratch MLX-Swift architecture ports, made against Meta's official code and checkpoints, of two SAM2-family
+promptable-segmentation models:
 
   EdgeTAM — Copyright (c) Meta Platforms, Inc. and affiliates — Apache License 2.0
   https://github.com/facebookresearch/EdgeTAM
   "EdgeTAM: On-Device Track Anything Model" (arXiv 2501.07256)
   Built on the SAM 2 codebase (Apache-2.0). Image encoder = RepViT-M1 (timm, Apache-2.0).
+  Ported: image mode (point/box → mask) and video masklet tracking (perceiver + memory attention + memory bank).
 
-The Swift/MLX port (`Sources/EdgeTAM`, `Sources/MLXEdgeTAM`) is original to this repository and
-licensed MIT (see LICENSE). The EdgeTAM/SAM 2 architecture and original weights remain Apache-2.0.
+  SAM 2.1 (Segment Anything in Images and Videos) — Copyright (c) Meta Platforms, Inc. and affiliates —
+  Apache License 2.0 — https://github.com/facebookresearch/sam2 (arXiv 2408.00714)
+  Image encoder = Hiera (Apache-2.0). Ported: image mode only (Hiera-S; tiny/base+/large configs supported).
 
-This repository ports **image-mode** promptable segmentation (point/box → mask). The video
-masklet-tracking stack (2D-spatial perceiver + memory attention + memory bank) is a future addition.
+The Swift/MLX port (`Sources/EdgeTAM`, `Sources/MLXEdgeTAM`) is original to this repository and licensed MIT
+(see LICENSE). The model architectures and original weights remain Apache-2.0.
 
-Converted MLX weights (fp16): https://huggingface.co/mlx-community/EdgeTAM-fp16
+Converted MLX weights (fp16):
+  https://huggingface.co/mlx-community/EdgeTAM-fp16
+  https://huggingface.co/mlx-community/SAM2.1-hiera-small-fp16
 
 Two-layer license declaration for MLXEngine admission (C7/C8):
   weight license = Apache-2.0   ·   port-code license = MIT   (both permissive).

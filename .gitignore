@@ -13,3 +13,4 @@ oracle/weights
 oracle/goldens
 oracle/upstream
 *.profraw
+.dd2/

@@ -1,13 +1,18 @@
 import Foundation
 import MLX
 
-/// EdgeTAM image-mode forward (RepViT-M1 encoder + FpnNeck + SAM prompt encoder + mask decoder) over a
-/// flat NHWC weights dict (from `oracle/convert.py`). Functional style, transcribed 1:1 from the
-/// parity-verified `oracle/mlx_encoder.py` + `oracle/mlx_decoder.py` (image_embed 9.7e-6, masks 8.2e-5).
+/// SAM2-family image-mode forward over a flat NHWC weights dict: backbone (EdgeTAM's RepViT-M1, or SAM 2.1's
+/// Hiera — `Hiera.swift`, picked from the weights) + FpnNeck + SAM prompt encoder + mask decoder. Functional
+/// style; parity-locked through `setImage` against the upstream PyTorch predictors (AB-T-0171 / AB-T-0173).
 public final class EdgeTAMModel: @unchecked Sendable {
 
     let w: [String: MLXArray]
-    public init(weights: [String: MLXArray]) { self.w = weights }
+    /// Non-nil for a SAM 2.1 (Hiera) checkpoint — `convert_sam21.py`; nil = EdgeTAM (RepViT).
+    public let hiera: HieraSpec?
+    let cache = ConstantCache()
+    /// dtype the weights were loaded in (from `no_mem_embed`).
+    public var weightDType: DType? { w["no_mem_embed"]?.dtype }
+    public init(weights: [String: MLXArray]) { self.w = weights; self.hiera = HieraSpec.detect(weights) }
 
     func a(_ k: String) -> MLXArray { w[k]! }                          // convs already NHWC from convert
     func has(_ k: String) -> Bool { w[k] != nil }
@@ -89,7 +94,7 @@ public final class EdgeTAMModel: @unchecked Sendable {
 
     /// Encoder → image_embed `(1,64,64,256)` (FPN out[2] + no_mem_embed).
     public func encode(_ input: MLXArray) -> (imageEmbed: MLXArray, fpn0: MLXArray, fpn1: MLXArray) {
-        let out = fpn(trunk(input))
+        let out = fpn(hiera.map { hieraTrunk(input, $0) } ?? trunk(input))
         let emb = out[2] + a("no_mem_embed").reshaped([1, 1, 1, 256])
         return (emb, out[0], out[1])
     }
