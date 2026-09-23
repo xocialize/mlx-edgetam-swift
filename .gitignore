@@ -12,3 +12,4 @@ oracle/__pycache__/
 oracle/weights
 oracle/goldens
 oracle/upstream
+*.profraw
