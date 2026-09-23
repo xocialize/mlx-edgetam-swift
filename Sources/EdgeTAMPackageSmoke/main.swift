@@ -19,6 +19,8 @@ struct PackageSmoke: AsyncParsableCommand {
     @Option(name: .long) var point: String = "500,375"
     @Option(name: .long) var out: String
     @Option(name: .long) var dtype: String = "float32"
+    @Option(name: .long, help: "Also run a box prompt 'x0,y0,x1,y1' (source px) on the same image.") var box: String?
+    @Flag(name: .long, help: "Request the soft matte (mode softMatte) for the box run.") var soft = false
 
     func run() async throws {
         let decl = EdgeTAMPackage.manifest.license
@@ -44,5 +46,20 @@ struct PackageSmoke: AsyncParsableCommand {
         print(String(format: "[pkg] run → matte %dx%d kind=%@ score=%.3f  (%.2fs, peak %.2f GB) → %@",
                      r.matte.width ?? 0, r.matte.height ?? 0, r.matte.kind.rawValue, r.score,
                      secs, Double(MLX.Memory.peakMemory) / 1e9, out))
+        // Same image again: the package keeps the encoder features (SAM2 set_image) → decoder-only.
+        let t1 = Date()
+        let again = try await pkg.run(req) as! PromptSegmentResponse
+        print(String(format: "[pkg] repeat (same image, cached features) score=%.3f  %.3fs", again.score, Date().timeIntervalSince(t1)))
+        if let box {
+            let b = box.split(separator: ",").map { Float($0)! }
+            let breq = PromptSegmentRequest(image: Image(format: .jpeg, data: data), box: b,
+                                            mode: soft ? EdgeTAMPackage.softMatte : nil)
+            let t2 = Date()
+            let br = try await pkg.run(breq) as! PromptSegmentResponse
+            let bout = (out as NSString).deletingPathExtension + "-box.png"
+            try br.matte.data.write(to: URL(fileURLWithPath: bout))
+            print(String(format: "[pkg] box %@ → kind=%@ score=%.3f  %.3fs → %@", box, br.matte.kind.rawValue,
+                         br.score, Date().timeIntervalSince(t2), bout))
+        }
     }
 }

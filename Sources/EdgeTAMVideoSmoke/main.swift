@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 import ArgumentParser
 import MLX
 import EdgeTAM
@@ -13,6 +15,8 @@ struct VideoSmoke: ParsableCommand {
 
     @Option(name: .long) var weights: String
     @Option(name: .long, help: "parity_video.safetensors") var parity: String
+    @Option(name: .long, help: "Lossless PNG of the PIL-decoded bedroom frame 0 (oracle/goldens/bedroom_f0.png): gates the video predictor's OWN preprocessing (PIL bicubic resize) against upstream's frame tensor.")
+    var sourceFrame: String?
     @Option(name: .long, help: "GPU flat-footprint measurement: cycle the 5 embedded frames to N, stream through propagate, report MLX.Memory.peakMemory (0 = CPU parity gate).")
     var measureFrames: Int = 0
 
@@ -86,9 +90,9 @@ struct VideoSmoke: ParsableCommand {
             print(String(format: "[vid-smoke] propagate f%d  IoU=%.4f  cov=%.2f%%", i, iou,
                          pred.mean().item(Float.self) * 100))
         }
-        let ok = minIoU > 0.90
+        let ok = minIoU > 0.99
         failed = failed || !ok
-        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.90  %@",
+        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.99  %@",
                      ("propagate (5 frames)" as NSString).utf8String!, minIoU, ok ? "OK ✅" : "FAIL ❌"))
 
         // Binary-IoU helper for the v2 cases.
@@ -123,9 +127,9 @@ struct VideoSmoke: ParsableCommand {
         // Independence: object 0 (boy) in the shared-encode multi-object pass == the single-object Swift
         // track bit-for-bit (per-object memory banks don't interact; shared encode is deterministic).
         for i in 0 ..< 5 { indepMin = min(indepMin, iouAB(tracks[0].masks[i], masks[i])) }
-        let moOK = moMin > 0.90, indepOK = indepMin > 0.999
+        let moOK = moMin > 0.99, indepOK = indepMin > 0.999
         failed = failed || !moOK || !indepOK
-        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.90  %@",
+        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.99  %@",
                      ("multi-object (2×5f)" as NSString).utf8String!, moMin, moOK ? "OK ✅" : "FAIL ❌"))
         print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.999 %@  (obj0==single Swift)",
                      ("  obj0 independence" as NSString).utf8String!, indepMin, indepOK ? "OK ✅" : "FAIL ❌"))
@@ -144,11 +148,27 @@ struct VideoSmoke: ParsableCommand {
             print(String(format: "[vid-smoke]   box f%d  IoU=%.4f  cov=%.2f%%", i, v,
                          (bmasks[i] .> 0).asType(.float32).mean().item(Float.self) * 100))
         }
-        let boxOK = boxMin > 0.85     // single-mask box-prompt frame + propagated track all parity-match
+        let boxOK = boxMin > 0.99     // upstream box tokens + binarized prompted-frame memory (AB-T-0171); was 0.85, which hid both bugs
         failed = failed || !boxOK
-        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.85  %@",
+        print(String(format: "[vid-smoke] %-22s min_IoU=%.4f  thr=0.99  %@",
                      ("box prompt (5f)" as NSString).utf8String!, boxMin, boxOK ? "OK ✅" : "FAIL ❌"))
 
+        // 10) Video preprocessing (AB-T-0171): EdgeTAMVideoPredictor.preprocess on the source frame vs upstream's
+        //     preprocessed frame 0 — PIL bicubic resize + ImageNet norm. 1 uint8 LSB = 1/255/0.224 ≈ 0.0175.
+        if let sourceFrame {
+            guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: sourceFrame) as CFURL, nil),
+                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { throw ExitCode(1) }
+            let vp = EdgeTAMVideoPredictor(weights: w)
+            let x = vp.preprocess(cg, origW: cg.width, origH: cg.height)
+            let gold = fx["frames"]![0 ..< 1]
+            let d = MLX.abs(x - gold)
+            let maxErr = d.max().item(Float.self)
+            let offGrid = (d .> 0.009).asType(.float32).mean().item(Float.self)   // pixels ≥ ½ LSB off
+            let ok = maxErr < 0.04 && offGrid < 1e-3
+            failed = failed || !ok
+            print(String(format: "[vid-smoke] %-22s max_abs=%.3e  off-by-LSB=%.2e  thr=2 LSB, <1e-3  %@",
+                         ("preprocess (PIL bic.)" as NSString).utf8String!, maxErr, offGrid, ok ? "OK ✅" : "FAIL ❌"))
+        }
         if failed { throw ExitCode(1) }
         print("[vid-smoke] ALL P2 PARITY GATES PASSED ✅")
     }

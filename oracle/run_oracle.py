@@ -7,7 +7,8 @@ import numpy as np
 from PIL import Image
 import torch
 
-REPO = "/Users/dustinnielson/Development/porting_dev_opportunities/_eval/EdgeTAM"
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.join(HERE, "upstream/EdgeTAM")   # git clone https://github.com/facebookresearch/EdgeTAM (ships edgetam.pt)
 sys.path.insert(0, REPO)
 os.chdir(REPO)  # hydra config + relative paths resolve from the repo root
 
@@ -15,7 +16,6 @@ import sam2  # noqa: E402  registers the hydra config module
 from sam2.build_sam import build_sam2  # noqa: E402
 from sam2.sam2_image_predictor import SAM2ImagePredictor  # noqa: E402
 
-HERE = "/Users/dustinnielson/Development/MLXEngine/mlx-edgetam-swift/oracle"
 
 
 def main():
@@ -24,7 +24,18 @@ def main():
     predictor = SAM2ImagePredictor(model)
 
     img = np.array(Image.open("notebooks/images/truck.jpg").convert("RGB"))
+    enc_input = predictor._transforms(img)[None]            # the backbone's exact input (Swift parity gate)
     predictor.set_image(img)
+    cap = {}
+    dec = model.sam_mask_decoder; dec_fwd = dec.forward
+    def dec_wrap(*a, **k):                                   # raw 256² multimask logits, before the ±32 clamp
+        r = dec_fwd(*a, **k); cap["dec_masks_raw"] = r[0].detach().numpy(); return r
+    dec.forward = dec_wrap
+    pe = model.sam_prompt_encoder; pe_fwd = pe.forward
+    def pe_wrap(points=None, boxes=None, masks=None):       # model-space (1024²) coords + labels
+        cap["unnorm_coords"] = points[0].numpy(); cap["labels"] = points[1].numpy()
+        return pe_fwd(points=points, boxes=boxes, masks=masks)
+    pe.forward = pe_wrap
 
     pt = np.array([[500, 375]]); lbl = np.array([1])      # click on the truck
     masks, scores, low_res = predictor.predict(
@@ -40,6 +51,10 @@ def main():
     np.save(f"{g}/scores.npy", scores)
     np.save(f"{g}/low_res.npy", low_res)
     np.save(f"{g}/input_image.npy", img)
+    np.save(f"{g}/enc_input.npy", enc_input.numpy())
+    for k in ("dec_masks_raw", "unnorm_coords", "labels"):
+        np.save(f"{g}/{k}.npy", cap[k])
+    Image.fromarray(img).save(f"{g}/truck.png")             # the e2e (--image) input, lossless
 
     print(f"[oracle] image {img.shape}  embed {tuple(feats['image_embed'].shape)}")
     print(f"[oracle] high_res_feats: {[tuple(h.shape) for h in feats.get('high_res_feats', [])]}")

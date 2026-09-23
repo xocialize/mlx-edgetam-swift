@@ -26,8 +26,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
         // MLXToolKit contract (promptSegment 1.10.0 + trackObject 1.11.0); 0.27.0 = the CAN
-        // cancellation gate (MLXServeConformance CAN-1..3).
-        .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.27.0"),
+        // cancellation gate (MLXServeConformance CAN-1..3); 0.44.0 = the canonical store layout
+        // (`models--<org>--<name>/`, 1.22) + engine-executed WeightSourcing materialization (1.24) — the
+        // floor ForgeCore already resolves (AB-T-0171 store-split fix).
+        .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.44.0"),
         // FFmpeg-free native video decode (Video bytes → frames) for the trackObject runtime surface.
         // Stable version pin (v0.2.0 = the decode(input:) frames-in seam at 27e767f) so EdgeTAM's whole
         // graph is version-based and consumable by tag — a revision sub-dep breaks version consumers (SwiftPM).
@@ -70,6 +72,14 @@ let package = Package(
                            .product(name: "MLXToolKit", package: "mlx-engine-swift"),
                            .product(name: "ArgumentParser", package: "swift-argument-parser")],
             path: "Sources/EdgeTAMVideoPackageSmoke"),
+        // End-to-end parity THROUGH setImage on non-square images vs upstream PyTorch goldens (AB-T-0171).
+        // Needs local weights (skips otherwise); golden = oracle/make_parity_golden.py.
+        .testTarget(
+            name: "EdgeTAMParityTests",
+            dependencies: ["EdgeTAM", .product(name: "MLX", package: "mlx-swift")],
+            path: "Tests/EdgeTAMParityTests",
+            exclude: ["nonsquare_golden.json"],
+            swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(
             name: "MLXEdgeTAMTests",
             dependencies: [

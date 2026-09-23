@@ -18,8 +18,8 @@ import numpy as np
 import torch
 import mlx.core as mx
 
-HERE = os.path.dirname(__file__)
-CKPT = "/Users/dustinnielson/Development/porting_dev_opportunities/_eval/EdgeTAM/checkpoints/edgetam.pt"
+HERE = os.path.dirname(os.path.abspath(__file__))
+CKPT = os.path.join(HERE, "upstream/EdgeTAM/checkpoints/edgetam.pt")   # the upstream repo ships it
 CONV_T = {"sam_mask_decoder.output_upscaling.0.weight", "sam_mask_decoder.output_upscaling.3.weight"}
 RAW_4D = {"maskmem_tpos_enc"}  # learned param (7,1,1,64), NOT a conv → no NHWC transpose
 KEEP = ("image_encoder", "sam_prompt_encoder", "sam_mask_decoder", "no_mem_embed",
@@ -59,6 +59,10 @@ def main():
         "scores": mx.array(np.load(f"{g}/scores.npy").astype(np.float32)),                    # (3,)
     }
     mx.save_safetensors(f"{HERE}/weights/parity.safetensors", fx)
+    # --postproc fixture: the predictor's full-res (source px) logits + scores for the bilinear + e2e checks
+    mx.save_safetensors(f"{HERE}/weights/postproc.safetensors", {
+        "masks_full": mx.array(np.load(f"{g}/masks_logits.npy").astype(np.float32)),         # (3,H,W)
+        "scores": mx.array(np.load(f"{g}/scores.npy").astype(np.float32))})
     print(f"[fixture] {[ (k,tuple(v.shape)) for k,v in fx.items() ]}")
 
     video_fixture(g)

@@ -7,13 +7,13 @@ import numpy as np
 from PIL import Image
 import torch
 
-REPO = "/Users/dustinnielson/Development/porting_dev_opportunities/_eval/EdgeTAM"
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.join(HERE, "upstream/EdgeTAM")   # git clone https://github.com/facebookresearch/EdgeTAM
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import sam2  # noqa: E402  hydra config
 from sam2.build_sam import build_sam2_video_predictor  # noqa: E402
 
-HERE = "/Users/dustinnielson/Development/MLXEngine/mlx-edgetam-swift/oracle"
 
 
 def main():

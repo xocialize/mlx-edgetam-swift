@@ -29,10 +29,12 @@ public final class EdgeTAMVideoPredictor: @unchecked Sendable {
         public let score: Float     // object-score logit (>0 ≈ present; ≤0 ≈ occluded/absent)
     }
 
-    /// Preprocess one source frame → `(1,1024,1024,3)` ImageNet-normalized model input.
-    private func preprocess(_ cg: CGImage, origW: Int, origH: Int) -> MLXArray {
+    /// Preprocess one source frame → `(1,1024,1024,3)` ImageNet-normalized model input. Upstream's video
+    /// predictor resizes each frame with PIL (`Image.resize`, bicubic, antialiased, uint8) — not the image
+    /// predictor's torch bilinear; v0.4.x used plain bilinear here (AB-T-0171).
+    public func preprocess(_ cg: CGImage, origW: Int, origH: Int) -> MLXArray {
         let rgb = EdgeTAMImage.rgb(from: cg, width: origW, height: origH)
-        let resized = EdgeTAMImage.bilinear(rgb, outH: 1024, outW: 1024)
+        let resized = EdgeTAMImage.resizePILBicubic(rgb, outH: 1024, outW: 1024)
         return (resized - mean) / std
     }
 

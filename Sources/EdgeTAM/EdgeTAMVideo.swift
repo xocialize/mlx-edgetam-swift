@@ -261,8 +261,11 @@ extension EdgeTAMModel {
         // best-by-IoU of 1..3; else the single mask at index 0. Object-score hard-gate (NO_OBJ_SCORE −1024).
         let scoreF = objScore.item(Float.self)
         let isObj = scoreF > 0
+        // Single-mask mode applies SAM2's `_dynamic_multimask_via_stability` (build_sam apply_postprocessing):
+        // an unstable token-0 mask falls back to the best multimask LOGITS, but obj_ptr keeps token 0.
         let sel: Int = multimask ? 1 + MLX.argMax(iou[0..., 1 ..< 4][0], axis: -1).item(Int.self) : 0
-        var lowResBest = masks[0..., sel ..< (sel + 1), 0..., 0...]     // (1,1,256,256)
+        let maskSel = multimask ? sel : dynamicMultimaskIndex(masks[0], iou[0])
+        var lowResBest = masks[0..., maskSel ..< (maskSel + 1), 0..., 0...]     // (1,1,256,256)
         if !isObj { lowResBest = MLX.zeros(like: lowResBest) - 1024.0 }
         // obj_ptr from the selected mask token → 3-MLP → fixed_no_obj_ptr gate
         let samTok = maskToks[0..., sel, 0...]                          // (1,256)
@@ -392,10 +395,15 @@ extension EdgeTAMModel {
                     boxPx: isInit ? boxes[o] : nil,
                     multimask: isInit ? (numPts <= 1) : true)
 
-                // Encode new memory: high-res (1024) mask → sigmoid·20−10 → mem-encoder → perceiver compress.
+                // Encode new memory: high-res (1024) mask → ·20−10 → mem-encoder → perceiver compress. A PROMPTED
+                // frame's mask is BINARIZED first (`logit > 0`), every other frame's goes through sigmoid —
+                // build_sam2_video_predictor's `binarize_mask_from_pts_for_mem_enc=true` ("the memory encodes
+                // exactly the mask the user saw from clicking"). v0.4.x always used sigmoid, which drifted the
+                // propagated track (bedroom f1–4 IoU 0.92–0.96 vs upstream; AB-T-0171).
                 let lrNHWC = lowResBest.transposed(0, 2, 3, 1)          // (1,256,256,1)
                 let hiRes = EdgeTAMImage.bilinear(lrNHWC, outH: 1024, outW: 1024)
-                let maskForMem = MLX.sigmoid(hiRes) * 20.0 - 10.0
+                let prompted = isInit && (clicks[o] != nil || boxes[o] != nil)
+                let maskForMem = (prompted ? (hiRes .> 0).asType(hiRes.dtype) : MLX.sigmoid(hiRes)) * 20.0 - 10.0
                 let maskmem = memoryEncoder(rawFeat, maskForMem)        // (1,64,64,64); no_obj_embed_spatial absent
                 let (spatial, spatialPos) = perceiver(maskmem, maskmemPos) // (1,512,64),(1,512,64)
                 let fm = FrameMemory(spatial: spatial[0], spatialPos: spatialPos[0], objPtr: objPtr[0],

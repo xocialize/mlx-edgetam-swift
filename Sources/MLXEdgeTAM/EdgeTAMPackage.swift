@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
@@ -52,7 +53,8 @@ public final class EdgeTAMPackage: ModelPackage {
                 PromptSegmentContract.descriptor(
                     name: "edgetam",
                     summary: "EdgeTAM promptable segmentation — image + point/box → object mask. "
-                        + "On-device SAM 2; click/box-select for cutout + erase masks."),
+                        + "On-device SAM 2; click/box-select for cutout + erase masks.",
+                    modes: [softMatte]),
                 TrackObjectContract.descriptor(
                     name: "edgetam-track",
                     summary: "EdgeTAM promptable video tracking — video + a click on one frame → a "
@@ -62,13 +64,20 @@ public final class EdgeTAMPackage: ModelPackage {
 
     private let configuration: Configuration
     private var predictor: EdgeTAMPredictor?
+    /// SHA-256 of the image bytes `predictor` currently holds features for (nil = none).
+    private var imageKey: String?
+
+    /// promptSegment mode: return the ANTI-ALIASED matte (`Matte.Kind.softAlpha`, a ~1–2 px coverage ramp at the
+    /// edge from the logits' signed distance; `EdgeTAMPredictor.antialiasedMatte`) instead of the thresholded
+    /// binary mask. Same selection — its 0.5 level is exactly the binary mask's edge.
+    public nonisolated static let softMatte: Mode = "softMatte"
     private var videoPredictor: EdgeTAMVideoPredictor?
 
     public nonisolated init(configuration: Configuration) { self.configuration = configuration }
 
     public func load() async throws { if predictor == nil { predictor = try await build() } }
     public func unload() async {
-        predictor = nil; videoPredictor = nil
+        predictor = nil; videoPredictor = nil; imageKey = nil
         // Dropping the refs alone leaves the weight/activation buffers in MLX's pool, so
         // phys_footprint doesn't fall and engine.evict / R-MEM-1 can't reclaim. Flush the pool.
         MLX.Memory.clearCache()
@@ -90,25 +99,32 @@ public final class EdgeTAMPackage: ModelPackage {
     // MARK: promptSegment (image)
 
     private func runSegment(_ req: PromptSegmentRequest) async throws -> PromptSegmentResponse {
-        guard !req.points.isEmpty else { throw EdgeTAMError.noPrompt }  // V1: point prompts (box = follow-up)
+        guard !req.points.isEmpty || req.box != nil else { throw EdgeTAMError.noPrompt }
         if predictor == nil { predictor = try await build() }
-        let cg = try Self.decode(req.image)
         let labels = req.pointLabels.count == req.points.count ? req.pointLabels : Array(repeating: 1, count: req.points.count)
-        // Single-shot inference is profiled (MLX_PROFILE=1). `setImage` only builds the lazy preprocess
-        // graph — nothing realizes until `predict` evals (IoU asArray + best-mask eval), so encode and
-        // decode land in ONE forward and get one honest coarse region. beginRun sits AFTER the lazy
-        // build so a first-request weight download can't skew the run.
+        // The encoder runs once per IMAGE (SAM2 set_image semantics): a repeat request on the same image
+        // bytes — the interactive click / add-point / box loop — is decoder-only.
+        let key = SHA256.hash(data: req.image.data).description
         let prof = MLXProfiler.shared
-        prof.beginRun("edgetam promptSegment points=\(req.points.count) \(cg.width)x\(cg.height)")
-        let r = prof.region("segment", "forward") { () -> (mask: MLXArray, score: Float, fullLogits: MLXArray, scores: [Float]) in
-            predictor!.setImage(cg)
-            return predictor!.predict(points: req.points, labels: labels)
+        var cg: CGImage?
+        if key != imageKey {
+            cg = try Self.decode(req.image)
+            prof.beginRun("edgetam promptSegment points=\(req.points.count) \(cg!.width)x\(cg!.height)")
+        } else {
+            prof.beginRun("edgetam promptSegment points=\(req.points.count) (cached image)")
         }
+        let r = prof.region("segment", "forward") { () -> EdgeTAMPredictor.Prediction in
+            if let cg { predictor!.setImage(cg) }
+            return predictor!.predict(points: req.points, labels: labels, box: req.box)
+        }
+        imageKey = key
         prof.endRun(denominators: ["image": 1])
         try Task.checkCancellation()
-        let png = try Self.encodePNG(EdgeTAMImage.maskCGImage(r.mask))
+        let soft = req.mode == Self.softMatte
+        let png = try Self.encodePNG(soft ? EdgeTAMImage.matteCGImage(r.soft) : EdgeTAMImage.maskCGImage(r.mask))
         return PromptSegmentResponse(
-            matte: Matte(format: .png, data: png, width: cg.width, height: cg.height, kind: .binary),
+            matte: Matte(format: .png, data: png, width: r.mask.dim(1), height: r.mask.dim(0),
+                         kind: soft ? .softAlpha : .binary),
             score: r.score)
     }
 
@@ -176,18 +192,34 @@ public final class EdgeTAMPackage: ModelPackage {
         let url = try await weightsURL()
         return try EdgeTAMVideoPredictor.fromPretrained(url.path, dtype: Self.dtype(configuration.quant))
     }
+    /// Weights resolution, canonical store first (AB-T-0171). With engine ≥ 1.24 the materializer has already
+    /// placed the file flat in `ModelStore.directory(for:)`, so the hub fallback below never runs in-app.
     private func weightsURL() async throws -> URL {
         if let o = configuration.weightsURL {
             guard FileManager.default.fileExists(atPath: o.path) else { throw EdgeTAMError.weightsMissing(o) }
             return o
         }
-        let hub = HubApi(downloadBase: configuration.modelsRootDirectory)
-        let dir = try await hub.snapshot(from: configuration.repo, matching: ["*.safetensors"]) { @Sendable p in
+        if let found = Self.storedWeights(configuration) { return found }
+        // Engine-less / pre-1.24 caller: the package's own hub download (swift-transformers layout).
+        let hub = configuration.modelsRootDirectory.map { HubApi(downloadBase: $0) } ?? HubApi()
+        let dir = try await hub.snapshot(from: configuration.repo, matching: [configuration.weightsFile]) { @Sendable p in
             WeightDownloadProgress.report(fraction: p.fractionCompleted)
         }
         let url = dir.appendingPathComponent(configuration.weightsFile)
         guard FileManager.default.fileExists(atPath: url.path) else { throw EdgeTAMError.weightsMissing(url) }
         return url
+    }
+
+    /// An already-materialized weights file under the store root, in precedence order: the engine's flat
+    /// layout, the hub-cache snapshot, then the swift-transformers layout v0.4.x downloaded into (existing
+    /// installs keep working without a re-download).
+    nonisolated static func storedWeights(_ c: EdgeTAMConfiguration) -> URL? {
+        guard let root = c.modelsRootDirectory else { return nil }
+        let store = ModelStore(root: root)
+        let candidates = [store.directory(for: c.repo), store.snapshotDirectory(for: c.repo),
+                          root.appending(path: "models/\(c.repo)", directoryHint: .isDirectory)]
+        return candidates.compactMap { $0?.appending(path: c.weightsFile) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
     }
     private nonisolated static func dtype(_ q: Quant) -> DType {
         switch q { case .fp32: return .float32; case .bf16: return .bfloat16; default: return .float16 }

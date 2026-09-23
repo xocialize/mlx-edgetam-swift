@@ -8,3 +8,7 @@ oracle/*.png
 .DS_Store
 oracle/publish_edgetam/
 oracle/__pycache__/
+.dd/
+oracle/weights
+oracle/goldens
+oracle/upstream

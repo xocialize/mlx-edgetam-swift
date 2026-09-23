@@ -111,26 +111,22 @@ public final class EdgeTAMModel: @unchecked Sendable {
 
     // MARK: prompt encoder
     /// Point and/or box prompts → sparse tokens + the no-mask dense embedding. Coordinates are in model
-    /// space (1024²). SAM convention: the trailing `not_a_point` pad token is appended ONLY when no box is
-    /// present; a box contributes two corner tokens (top-left → `point_embeddings.2`, bottom-right → `.3`).
+    /// space (1024²). SAM2 convention (SAM2ImagePredictor._predict / SAM2VideoPredictor.add_new_points_or_box):
+    /// a box is merged into the POINT list as two corner points labelled 2 (top-left) and 3 (bottom-right),
+    /// placed BEFORE the clicks, and the prompt encoder is called with `boxes=None` — so the trailing
+    /// `not_a_point` pad token is ALWAYS appended. (SAM1's separate-box path, no pad, is not what SAM2 runs;
+    /// v0.4.x used it and diverged from upstream on every box prompt — AB-T-0171.)
     func embedPrompt(_ coordsPx: MLXArray, _ labels: [Int], box: [Float]? = nil) -> (sparse: MLXArray, dense: MLXArray) {
+        var coords: [MLXArray] = []
+        var all: [Int] = []
+        if let box { coords.append(MLXArray([box[0], box[1], box[2], box[3]] as [Float], [2, 2])); all += [2, 3] }
+        if !labels.isEmpty { coords.append(coordsPx.reshaped([labels.count, 2])); all += labels }
+        coords.append(MLXArray([-0.5, -0.5] as [Float], [1, 2])); all.append(-1)   // pad: (0,0) after the +0.5 shift
+        let pe = peEncoding((MLX.concatenated(coords, axis: 0) + 0.5) / 1024.0)       // (N,256)
         var rows: [MLXArray] = []
-        if !labels.isEmpty {
-            let pad = (box == nil)                                    // pad with a not_a_point token iff no box
-            let pts = pad ? MLX.concatenated([coordsPx + 0.5, MLXArray([0.0, 0.0] as [Float], [1, 2])], axis: 0)
-                          : coordsPx + 0.5
-            let labelsF = pad ? labels + [-1] : labels
-            let pe = peEncoding(pts / 1024.0)                         // (N[+1],256)
-            for (i, lb) in labelsF.enumerated() {
-                if lb == -1 { rows.append(a("sam_prompt_encoder.not_a_point_embed.weight")[0]) }
-                else { rows.append(pe[i] + a("sam_prompt_encoder.point_embeddings.\(lb).weight")[0]) }
-            }
-        }
-        if let box {                                                 // box → 2 corner tokens (labels 2,3)
-            let corners = MLXArray([box[0], box[1], box[2], box[3]] as [Float], [2, 2]) + 0.5
-            let pe = peEncoding(corners / 1024.0)                     // (2,256)
-            rows.append(pe[0] + a("sam_prompt_encoder.point_embeddings.2.weight")[0])
-            rows.append(pe[1] + a("sam_prompt_encoder.point_embeddings.3.weight")[0])
+        for (i, lb) in all.enumerated() {
+            if lb == -1 { rows.append(a("sam_prompt_encoder.not_a_point_embed.weight")[0]) }
+            else { rows.append(pe[i] + a("sam_prompt_encoder.point_embeddings.\(lb).weight")[0]) }
         }
         let sparse = MLX.stacked(rows, axis: 0).reshaped([1, rows.count, 256])
         let dense = MLX.broadcast(a("sam_prompt_encoder.no_mask_embed.weight").reshaped([1, 1, 1, 256]), to: [1, 64, 64, 256])
@@ -168,6 +164,20 @@ public final class EdgeTAMModel: @unchecked Sendable {
         return (q, keys)
     }
 
+    // MARK: mask selection (SAM2 MaskDecoder, delta 0.05 / thresh 0.98 from build_sam apply_postprocessing)
+    /// SAM2 `_get_stability_scores`: IoU of the mask thresholded at +δ vs −δ (1 when both are empty).
+    public static func stabilityScore(_ logits: MLXArray, delta: Float = 0.05) -> Float {
+        let i = (logits .> delta).asType(.float32).sum().item(Float.self)
+        let u = (logits .> -delta).asType(.float32).sum().item(Float.self)
+        return u > 0 ? i / u : 1
+    }
+    /// SAM2 `_dynamic_multimask_via_stability` over all four tokens `(4,256,256)`/`(4,)`: token 0 if its
+    /// stability ≥ 0.98, else the best-IoU multimask token (1…3).
+    public func dynamicMultimaskIndex(_ masks: MLXArray, _ iou: MLXArray, thresh: Float = 0.98) -> Int {
+        if Self.stabilityScore(masks[0]) >= thresh { return 0 }
+        return 1 + MLX.argMax(iou[1 ..< 4], axis: -1).item(Int.self)
+    }
+
     // MARK: mask decoder
     func mlpHead(_ x0: MLXArray, _ p: String, _ n: Int) -> MLXArray {
         var x = x0
@@ -178,12 +188,37 @@ public final class EdgeTAMModel: @unchecked Sendable {
         MLX.convTransposed2d(x, a(k), stride: 2, padding: 0) + a(b)
     }
 
-    /// Full image-mode forward → (masks `(3,256,256)` raw logits, iou `(3,)`).
-    public func segment(input: MLXArray, coordsPx: MLXArray, labels: [Int]) -> (masks: MLXArray, iou: MLXArray) {
+    /// Per-image decoder inputs — what SAM2ImagePredictor.set_image caches in `_features`: image_embed
+    /// (FPN level 2 + no_mem_embed) and the two high-res skips after `conv_s0`/`conv_s1`. All NHWC.
+    public struct ImageFeatures {
+        public let imageEmbed: MLXArray   // (1,64,64,256)
+        public let highRes0: MLXArray     // (1,256,256,32)
+        public let highRes1: MLXArray     // (1,128,128,64)
+        public func eval() { MLX.eval(imageEmbed, highRes0, highRes1) }
+    }
+
+    /// Encoder half: preprocessed `(1,1024,1024,3)` → cached features. Run once per image.
+    public func features(_ input: MLXArray) -> ImageFeatures {
         let (emb, fpn0, fpn1) = encode(input)
-        let featS0 = conv(fpn0, "sam_mask_decoder.conv_s0.weight", b: "sam_mask_decoder.conv_s0.bias")
-        let featS1 = conv(fpn1, "sam_mask_decoder.conv_s1.weight", b: "sam_mask_decoder.conv_s1.bias")
-        let (sparse, dense) = embedPrompt(coordsPx, labels)
+        return ImageFeatures(
+            imageEmbed: emb,
+            highRes0: conv(fpn0, "sam_mask_decoder.conv_s0.weight", b: "sam_mask_decoder.conv_s0.bias"),
+            highRes1: conv(fpn1, "sam_mask_decoder.conv_s1.weight", b: "sam_mask_decoder.conv_s1.bias"))
+    }
+
+    /// Full image-mode forward → (masks `(3,256,256)` raw logits, iou `(3,)`) — the multimask outputs.
+    public func segment(input: MLXArray, coordsPx: MLXArray, labels: [Int]) -> (masks: MLXArray, iou: MLXArray) {
+        let (masks, iou) = decode(features(input), coordsPx: coordsPx, labels: labels)
+        return (masks[1 ..< 4], iou[1 ..< 4])                          // multimask: drop index 0 → 3
+    }
+
+    /// Decoder half over cached features. Points (model space, 1024²) and/or a box `[x0,y0,x1,y1]` (model
+    /// space). Returns ALL FOUR mask tokens: index 0 = the single-mask output, 1…3 = the multimask outputs
+    /// (SAM2 MaskDecoder.predict_masks before the multimask slice).
+    public func decode(_ f: ImageFeatures, coordsPx: MLXArray, labels: [Int], box: [Float]? = nil)
+        -> (masks: MLXArray, iou: MLXArray) {
+        let (emb, featS0, featS1) = (f.imageEmbed, f.highRes0, f.highRes1)
+        let (sparse, dense) = embedPrompt(coordsPx, labels, box: box)
         let D = "sam_mask_decoder"
         let outTokens = MLX.concatenated([a(D + ".obj_score_token.weight"), a(D + ".iou_token.weight"),
                                           a(D + ".mask_tokens.weight")], axis: 0).reshaped([1, 6, 256])
@@ -201,6 +236,6 @@ public final class EdgeTAMModel: @unchecked Sendable {
         let masks = MLX.matmul(hyper, u.reshaped([1, H * Wd, 32]).transposed(0, 2, 1)).reshaped([1, 4, H, Wd])
         let iou = MLX.sigmoid(mlpHead(iouTok, D + ".iou_prediction_head", 3))
         _ = q
-        return (masks[0, 1 ..< 4, 0..., 0...], iou[0, 1 ..< 4])        // multimask: drop index 0 → 3
+        return (masks[0], iou[0])                                      // (4,256,256), (4,)
     }
 }
